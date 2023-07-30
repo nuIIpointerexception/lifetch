@@ -1,24 +1,18 @@
 name: ci
+
 on:
-  pull_request:
   push:
     branches:
       - main
+  pull_request:
+
 jobs:
   build:
     strategy:
       fail-fast: false
       matrix:
-        target:
-          [
-            x86-linux,
-            x86_64-linux,
-            aarch64-linux,
-            riscv64-linux,
-            x86_64-macos-gnu,
-            x86_64-windows,
-          ]
-    runs-on: ubuntu-latest
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    runs-on: ${{matrix.os}}
     steps:
       - name: Checkout
         uses: actions/checkout@v2
@@ -29,10 +23,10 @@ jobs:
           version: master
 
       - name: Build
-        run: zig build -Doptimize=ReleaseFast -Dtarget=${{ matrix.target }}
+        run: zig build -Doptimize=ReleaseFast
 
       - name: Archive executable
         uses: actions/upload-artifact@v3
         with:
-          name: lifetch
+          name: poop
           path: zig-out/bin/*
