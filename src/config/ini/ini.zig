@@ -155,6 +155,19 @@ pub const Config = struct {
         return value;
     }
 
+    /// Get a float value for a specific key in a section.
+    ///   - Arguments:
+    ///   - section_name: The name of the section to search in.
+    ///   - key: The key to look for.
+    ///   - Returns:
+    ///   - The float associated with the key, or null if not found.
+    pub fn getFloat(self: Self, section_name: []const u8, key: []const u8) ?f32 {
+        var value = std.fmt.parseFloat(f32, get(self, section_name, key).?) catch {
+            return null;
+        };
+        return value;
+    }
+
     fn isEmptyLine(line: []const u8) bool {
         for (line) |c| {
             if (!isWSpace(c)) {
@@ -163,6 +176,7 @@ pub const Config = struct {
         }
         return true;
     }
+
     fn getEqualPos(slice: []u8) !usize {
         for (slice, 0..) |c, i| {
             if (c == '=') {

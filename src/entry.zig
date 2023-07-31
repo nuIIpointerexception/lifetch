@@ -1,4 +1,5 @@
 const std = @import("std");
+const err = @import("error/error.zig").err;
 const Config = @import("config/ini/ini.zig").Config;
 
 const print = std.debug.print;
@@ -13,7 +14,12 @@ pub fn main() !void {
     var cfg = try Config.init(path, arena.allocator());
     defer cfg.deinit();
 
-    std.debug.print("{s}\n", .{cfg.getString("general", "fetchText").?});
-    std.debug.print("boolean: {}\n", .{cfg.getBool("general", "boolean").?});
-    std.debug.print("number: {any}\n", .{cfg.getUnsigned("general", "number")});
+    std.debug.print("string: {s}\n", .{cfg.getString("test", "string").?});
+    std.debug.print("boolean: {}\n", .{cfg.getBool("test", "boolean").?});
+    std.debug.print("unsigned: {d}\n", .{cfg.getUnsigned("test", "unsigned").?});
+    std.debug.print("float: {d}\n", .{cfg.getFloat("test", "float").?});
+
+    err.new(4, "test error", arena.allocator());
+    err.new(2, "It can even be very long!!!", arena.allocator());
+    err.new(1, "It can also be on\nMultiple Lines!", arena.allocator());
 }
