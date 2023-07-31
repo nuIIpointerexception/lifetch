@@ -13,7 +13,7 @@ pub fn main() !void {
     var cfg = try Config.init(path, arena.allocator());
     defer cfg.deinit();
 
-    var fetchText: []const u8 = cfg.get("general", "fetchText").?;
-
-    std.debug.print("{s}\n", .{fetchText});
+    std.debug.print("{s}\n", .{cfg.getString("general", "fetchText").?});
+    std.debug.print("boolean: {}\n", .{cfg.getBool("general", "boolean").?});
+    std.debug.print("number: {any}\n", .{cfg.getUnsigned("general", "number")});
 }

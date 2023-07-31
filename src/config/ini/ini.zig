@@ -1,5 +1,7 @@
 const std = @import("std");
 
+// TODO Add Custom Error Handling.
+
 pub const Entry = struct { key: []const u8, value: []const u8 };
 
 pub const Section = struct {
@@ -101,12 +103,6 @@ pub const Config = struct {
         self.lines.deinit();
     }
 
-    /// Get the value for a specific key in a section.
-    ///   - Arguments:
-    ///   - section_name: The name of the section to search in.
-    ///   - key: The key to look for in the section.
-    ///   - Returns:
-    ///   - The value associated with the key in the given section, or undefined if not found.
     pub fn get(self: Self, section_name: []const u8, key: []const u8) ?[]const u8 {
         for (self.sections.items) |section| {
             if (std.mem.eql(u8, section.name, section_name)) {
@@ -117,7 +113,46 @@ pub const Config = struct {
                 }
             }
         }
-        return undefined;
+        return null;
+    }
+
+    /// Get a string value for a specific key in a section.
+    ///   - Arguments:
+    ///   - section_name: The name of the section to search in.
+    ///   - key: The key to look for.
+    ///   - Returns:
+    ///   - The string associated with the key, or null if not found.
+    pub fn getString(self: Self, section_name: []const u8, key: []const u8) ?[]const u8 {
+        return get(self, section_name, key);
+    }
+
+    /// Get a boolean value for a specific key in a section.
+    ///   - Arguments:
+    ///   - section_name: The name of the section to search in.
+    ///   - key: The key to look for.
+    ///   - Returns:
+    ///   - The boolean associated with the key, or null if not found.
+    pub fn getBool(self: Self, section_name: []const u8, key: []const u8) ?bool {
+        var value = get(self, section_name, key).?;
+        if (std.mem.eql(u8, value, "true")) {
+            return true;
+        } else if (std.mem.eql(u8, value, "false")) {
+            return false;
+        }
+        return null;
+    }
+
+    /// Get a integer value for a specific key in a section.
+    ///   - Arguments:
+    ///   - section_name: The name of the section to search in.
+    ///   - key: The key to look for.
+    ///   - Returns:
+    ///   - The integer associated with the key, or null if not found.
+    pub fn getUnsigned(self: Self, section_name: []const u8, key: []const u8) ?u8 {
+        var value = std.fmt.parseUnsigned(u8, get(self, section_name, key).?, 10) catch {
+            return null;
+        };
+        return value;
     }
 
     fn isEmptyLine(line: []const u8) bool {
