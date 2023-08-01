@@ -1,13 +1,12 @@
 const std = @import("std");
-const stdout = std.io.getStdOut();
-const outWriter = stdout.writer();
 
 fn writeLog(_: void, msg: []const u8) !usize {
-    nosuspend outWriter.print("{s}", .{msg}) catch return msg.len;
+    const stdout = std.io.getStdOut().writer();
+    nosuspend stdout.print("{s}", .{msg}) catch return msg.len;
     return msg.len;
 }
 
-pub fn border(str: []const u8, color: []const u8, allocator: std.mem.Allocator) void {
+pub fn drawBorder(str: []const u8, color: []const u8, allocator: std.mem.Allocator) void {
     var max_length: usize = 0;
     const verticalLeft = "│ ";
     const verticalRight = " │";
@@ -45,7 +44,7 @@ pub fn border(str: []const u8, color: []const u8, allocator: std.mem.Allocator) 
 }
 
 // TODO: rework this again, it's a complete mess
-fn stripColors(str: []const u8, allocator: std.mem.Allocator) ![]const u8 {
+pub fn stripColors(str: []const u8, allocator: std.mem.Allocator) ![]const u8 {
     var colorless: []u8 = undefined;
     var colorlessLen: usize = 0;
     var i: usize = 0;

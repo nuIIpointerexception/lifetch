@@ -19,7 +19,7 @@ pub fn main() !void {
     std.debug.print("unsigned: {d}\n", .{cfg.getUnsigned("test", "unsigned").?});
     std.debug.print("float: {d}\n", .{cfg.getFloat("test", "float").?});
 
-    err.new(4, "test error", arena.allocator());
-    err.new(2, "It can even be very long!!!", arena.allocator());
+    err.new(3, "test error", arena.allocator());
+    err.new(2, "It can even be veeeeeeeeeeeeeeeeeeeeeeeeeeeeeeery long!!!", arena.allocator());
     err.new(1, "It can also be on\nMultiple Lines!", arena.allocator());
 }
