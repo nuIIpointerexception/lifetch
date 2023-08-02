@@ -16,7 +16,7 @@ pub fn drawBorder(str: []const u8, color: []const u8, allocator: std.mem.Allocat
     var lines = std.ArrayList([]const u8).init(allocator);
     defer lines.deinit();
     while (iter.next()) |l| {
-        const line = stripColors(l, allocator) catch return;
+        const line = stripColors(l, &allocator) catch return;
         if (line.len > max_length) {
             max_length = line.len;
         }
@@ -43,32 +43,16 @@ pub fn drawBorder(str: []const u8, color: []const u8, allocator: std.mem.Allocat
     try writer.print("╯\n", .{});
 }
 
-// TODO: rework this again, it's a complete mess
-pub fn stripColors(str: []const u8, allocator: std.mem.Allocator) ![]const u8 {
-    var colorless: []u8 = undefined;
-    var colorlessLen: usize = 0;
-    var i: usize = 0;
-
-    while (i < str.len) {
-        if (str[i] == 27 and i + 2 < str.len and str[i + 1] == 91) {
-            i += 2;
-            while (i < str.len and str[i] != 109) {
-                i += 1;
-            }
-            i += 1;
-        } else {
-            colorlessLen += 1;
-            i += 1;
-        }
+pub fn stripColors(str: []const u8, allocator: *const std.mem.Allocator) ![]u8 {
+    var bufSize = str.len / 2;
+    if (bufSize < 16) {
+        bufSize = 16;
     }
 
-    if (colorlessLen == str.len) {
-        return str;
-    }
-    const colorlessPtr = try allocator.alloc(u8, colorlessLen);
-    colorless = colorlessPtr[0..colorlessLen];
+    var buf = try allocator.alloc(u8, bufSize);
     var j: usize = 0;
-    i = 0;
+
+    var i: usize = 0;
     while (i < str.len) {
         if (str[i] == 27 and i + 2 < str.len and str[i + 1] == 91) {
             i += 2;
@@ -77,11 +61,18 @@ pub fn stripColors(str: []const u8, allocator: std.mem.Allocator) ![]const u8 {
             }
             i += 1;
         } else {
-            colorless[j] = str[i];
+            if (j >= buf.len) {
+                const newSize = buf.len * 2;
+                const newBuf = try allocator.realloc(buf, newSize);
+                buf = newBuf;
+            }
+
+            buf[j] = str[i];
             i += 1;
             j += 1;
         }
     }
 
-    return colorless;
+    buf = try allocator.realloc(buf, j);
+    return buf;
 }
