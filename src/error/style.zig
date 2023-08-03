@@ -1,20 +1,17 @@
 const std = @import("std");
+const zstr = @import("../util/zstring.zig").zstr;
 
-fn writeLog(_: void, msg: []const u8) !usize {
-    const stdout = std.io.getStdOut().writer();
-    nosuspend stdout.print("{s}", .{msg}) catch return msg.len;
-    return msg.len;
-}
-
-pub fn drawBorder(str: []const u8, color: []const u8, allocator: std.mem.Allocator) void {
+pub fn drawBorder(str: []const u8, color: []const u8, allocator: std.mem.Allocator) !void {
     var max_length: usize = 0;
-    const verticalLeft = "│ ";
-    const verticalRight = " │";
-    var writer = std.io.Writer(void, error{}, writeLog){ .context = {} };
-    try writer.print("{s}╭", .{color});
+
+    var buffer = zstr.init(allocator);
+    defer buffer.deinit();
+    try buffer.concat(color);
+    try buffer.concat("╭");
     var iter = std.mem.split(u8, str, "\n");
     var lines = std.ArrayList([]const u8).init(allocator);
     defer lines.deinit();
+
     while (iter.next()) |l| {
         const line = stripColors(l, &allocator) catch return;
         if (line.len > max_length) {
@@ -22,27 +19,36 @@ pub fn drawBorder(str: []const u8, color: []const u8, allocator: std.mem.Allocat
         }
         lines.append(line) catch return;
     }
+
     for (max_length + 2) |_| {
-        try writer.print("─", .{});
+        try buffer.concat("─");
     }
-    try writer.print("╮\n", .{});
+
+    try buffer.concat("╮\n");
 
     for (lines.items) |i| {
         const padding = max_length - i.len;
-        try writer.print("{s}{s}", .{ verticalLeft, i });
+        try buffer.concat("│ ");
+        try buffer.concat(i);
         for (padding) |_| {
-            try writer.print(" ", .{});
+            try buffer.concat(" ");
         }
-        try writer.print("{s}\n", .{verticalRight});
+        try buffer.concat(" │\n");
     }
 
-    try writer.print("╰", .{});
+    try buffer.concat("╰");
+
     for (max_length + 2) |_| {
-        try writer.print("─", .{});
+        try buffer.concat("─");
     }
-    try writer.print("╯\n", .{});
+
+    try buffer.concat("╯\n");
+
+    const stdout = std.io.getStdOut().writer();
+    try nosuspend stdout.print("{s}", .{buffer.toSlice()});
 }
 
+// TODO: Move this somewhere else
 pub fn stripColors(str: []const u8, allocator: *const std.mem.Allocator) ![]u8 {
     var bufSize = str.len / 2;
     if (bufSize < 16) {

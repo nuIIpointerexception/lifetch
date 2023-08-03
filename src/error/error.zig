@@ -7,7 +7,7 @@ pub const err = struct {
 
     pub fn new(level: u8, message: []const u8, allocator: std.mem.Allocator) void {
         const str = std.fmt.allocPrint(allocator, "{s}: {s}", .{ getPrefix(level), message }) catch message;
-        style.drawBorder(str, getColor(level), allocator);
+        style.drawBorder(str, getColor(level), allocator) catch return;
     }
 
     fn getColor(level: u8) []const u8 {
