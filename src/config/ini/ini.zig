@@ -1,6 +1,5 @@
 const std = @import("std");
-
-// TODO Add Custom Error Handling.
+const err = @import("../../error/error.zig").err;
 
 pub const Entry = struct { key: []const u8, value: []const u8 };
 
@@ -19,6 +18,51 @@ pub const Section = struct {
 };
 
 pub const Config = struct {
+    pub const Error = struct {
+        pub const Value = error{
+            InvalidValue,
+            InvalidBoolean,
+            InvalidString,
+            InvalidFloat,
+            InvalidInteger,
+        };
+        pub const Syntax = error{
+            DelimiterError,
+            SyntaxError,
+        };
+        pub const Section = error{
+            SectionNotFound,
+            SectionDuplicate,
+        };
+        pub const Entry = error{
+            KeyNotFound,
+            KeyDuplicate,
+        };
+        pub const File = error{
+            FileNotFound,
+            FileReadError,
+        };
+        pub const Memory = error{
+            AllocationFailed,
+        };
+    };
+
+    pub const SyntaxError = struct {
+        line: usize,
+        position: usize,
+        msg: []const u8,
+
+        const SyntaxSelf = @This();
+
+        pub fn throw(self: SyntaxSelf, alloc: std.mem.Allocator) !void {
+            try err.new(3, try std.fmt.allocPrint(alloc, "SyntaxError | in config on line {d}, position {d}: {s}\n", .{
+                self.line,
+                self.position,
+                self.msg,
+            }), alloc);
+        }
+    };
+
     const Self = @This();
 
     sections: std.ArrayList(*Section),
@@ -42,8 +86,12 @@ pub const Config = struct {
         var cfg: Config = .{ .sections = std.ArrayList(*Section).init(alloc), .allocator = alloc, .lines = std.ArrayList([]u8).init(alloc) };
 
         var buf: [1024]u8 = undefined;
+        var line_num: usize = 0;
         while (try in_stream.readUntilDelimiterOrEof(&buf, '\n')) |original| {
-            var line = try alloc.alloc(u8, original.len);
+            line_num += 1;
+            var line = alloc.alloc(u8, original.len) catch {
+                return Error.Memory.AllocationFailed;
+            };
             std.mem.copy(u8, line, original);
             try cfg.lines.append(line);
 
@@ -57,7 +105,7 @@ pub const Config = struct {
             }
 
             if (first_char == '[') {
-                var current_section_name = try readSection(line);
+                var current_section_name = try readSection(alloc, line, line_num);
                 current_section = try alloc.create(Section);
                 current_section.* = .{ .name = current_section_name, .entries = std.ArrayList(*Entry).init(alloc) };
                 try cfg.sections.append(current_section);
@@ -65,8 +113,8 @@ pub const Config = struct {
             }
 
             var pos = try getEqualPos(line);
-            var key = trimWSpace(line[0..pos]);
-            var value = trimWSpace(line[pos + 1 .. line.len]);
+            var key = std.mem.trim(u8, line[0..pos], " \t\n\r");
+            var value = std.mem.trim(u8, line[pos + 1 .. line.len], " \t\n\r");
             var entry: *Entry = try alloc.create(Entry);
             entry.* = .{ .key = key, .value = value };
             try current_section.entries.append(entry);
@@ -84,7 +132,9 @@ pub const Config = struct {
     ///   - Possible Errors:
     ///   - Error when opening the file or parsing its contents.
     pub fn init(filename: []const u8, alloc: std.mem.Allocator) anyerror!Config {
-        var file = try std.fs.cwd().openFile(filename, .{});
+        var file = std.fs.cwd().openFile(filename, .{}) catch {
+            return Error.File.FileNotFound;
+        };
         return try parse(file, alloc);
     }
 
@@ -103,7 +153,7 @@ pub const Config = struct {
         self.lines.deinit();
     }
 
-    pub fn get(self: Self, section_name: []const u8, key: []const u8) ?[]const u8 {
+    pub fn get(self: Self, section_name: []const u8, key: []const u8) ![]const u8 {
         for (self.sections.items) |section| {
             if (std.mem.eql(u8, section.name, section_name)) {
                 for (section.entries.items) |entry| {
@@ -113,7 +163,7 @@ pub const Config = struct {
                 }
             }
         }
-        return null;
+        return Error.Section.SectionNotFound;
     }
 
     /// Get a string value for a specific key in a section.
@@ -121,8 +171,8 @@ pub const Config = struct {
     ///   - section_name: The name of the section to search in.
     ///   - key: The key to look for.
     ///   - Returns:
-    ///   - The string associated with the key, or null if not found.
-    pub fn getString(self: Self, section_name: []const u8, key: []const u8) ?[]const u8 {
+    ///   - The string associated with the key, or an error if not found.
+    pub fn getString(self: Self, section_name: []const u8, key: []const u8) ![]const u8 {
         return get(self, section_name, key);
     }
 
@@ -131,15 +181,15 @@ pub const Config = struct {
     ///   - section_name: The name of the section to search in.
     ///   - key: The key to look for.
     ///   - Returns:
-    ///   - The boolean associated with the key, or null if not found.
-    pub fn getBool(self: Self, section_name: []const u8, key: []const u8) ?bool {
-        var value = get(self, section_name, key).?;
+    ///   - The boolean associated with the key, or an error if not found.
+    pub fn getBool(self: Self, section_name: []const u8, key: []const u8) !bool {
+        var value = try get(self, section_name, key);
         if (std.mem.eql(u8, value, "true")) {
             return true;
         } else if (std.mem.eql(u8, value, "false")) {
             return false;
         }
-        return null;
+        return Error.Value.InvalidBoolean;
     }
 
     /// Get a integer value for a specific key in a section.
@@ -147,10 +197,10 @@ pub const Config = struct {
     ///   - section_name: The name of the section to search in.
     ///   - key: The key to look for.
     ///   - Returns:
-    ///   - The integer associated with the key, or null if not found.
-    pub fn getUnsigned(self: Self, section_name: []const u8, key: []const u8) ?u8 {
-        var value = std.fmt.parseUnsigned(u8, get(self, section_name, key).?, 10) catch {
-            return null;
+    ///   - The integer associated with the key, or an error if not found.
+    pub fn getUnsigned(self: Self, section_name: []const u8, key: []const u8) !u8 {
+        var value = std.fmt.parseUnsigned(u8, try get(self, section_name, key), 10) catch {
+            return Error.Value.InvalidInteger;
         };
         return value;
     }
@@ -160,17 +210,17 @@ pub const Config = struct {
     ///   - section_name: The name of the section to search in.
     ///   - key: The key to look for.
     ///   - Returns:
-    ///   - The float associated with the key, or null if not found.
-    pub fn getFloat(self: Self, section_name: []const u8, key: []const u8) ?f32 {
-        var value = std.fmt.parseFloat(f32, get(self, section_name, key).?) catch {
-            return null;
+    ///   - The float associated with the key, or an error if not found.
+    pub fn getFloat(self: Self, section_name: []const u8, key: []const u8) !f32 {
+        var value = std.fmt.parseFloat(f32, try get(self, section_name, key)) catch {
+            return Error.Value.InvalidFloat;
         };
         return value;
     }
 
     fn isEmptyLine(line: []const u8) bool {
         for (line) |c| {
-            if (!isWSpace(c)) {
+            if (!std.ascii.isWhitespace(c)) {
                 return false;
             }
         }
@@ -184,32 +234,19 @@ pub const Config = struct {
             }
         }
 
-        return error.DelimiterError;
+        return Error.Syntax.DelimiterError;
     }
 
-    fn readSection(input: []u8) ![]const u8 {
-        var trimmed_line = trimWSpace(input);
+    fn readSection(alloc: std.mem.Allocator, input: []u8, line_num: usize) ![]const u8 {
+        var trimmed_line = std.mem.trim(u8, input, " \t\n\r");
         if (trimmed_line[0] != '[' or trimmed_line[trimmed_line.len - 1] != ']') {
-            return error.SyntaxError;
+            const e = SyntaxError{ .line = line_num, .position = 0, .msg = "Expected section brackets" };
+            try e.throw(alloc);
         }
 
         var section_name: []const u8 = trimmed_line[1 .. trimmed_line.len - 1];
-        section_name = trimWSpace(section_name);
+        section_name = std.mem.trim(u8, section_name, " \t\n\r");
 
         return section_name;
-    }
-
-    fn trimWSpace(slice: []const u8) []const u8 {
-        var start: usize = 0;
-        while (isWSpace(slice[start])) : (start += 1) {}
-
-        var end: usize = slice.len;
-        while (isWSpace(slice[end - 1])) : (end -= 1) {}
-
-        return slice[start..end];
-    }
-
-    fn isWSpace(ch: u8) bool {
-        return ch == ' ' or ch == '\t' or ch == '\n' or ch == 13;
     }
 };

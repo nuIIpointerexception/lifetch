@@ -14,12 +14,8 @@ pub fn main() !void {
     var cfg = try Config.init(path, arena.allocator());
     defer cfg.deinit();
 
-    std.debug.print("string: {s}\n", .{cfg.getString("test", "string").?});
-    std.debug.print("boolean: {}\n", .{cfg.getBool("test", "boolean").?});
-    std.debug.print("unsigned: {d}\n", .{cfg.getUnsigned("test", "unsigned").?});
-    std.debug.print("float: {d}\n", .{cfg.getFloat("test", "float").?});
-
-    err.new(3, "test error", arena.allocator());
-    err.new(2, "It can even be veeeeeeeeeeeeeeeeeeeeeeeeeeeeeeery long!!!", arena.allocator());
-    err.new(1, "It can also be on\nMultiple Lines!", arena.allocator());
+    std.debug.print("string: {s}\n", .{try cfg.getString("test", "string")});
+    std.debug.print("boolean: {}\n", .{try cfg.getBool("test", "boolean")});
+    std.debug.print("unsigned: {d}\n", .{try cfg.getUnsigned("test", "unsigned")});
+    std.debug.print("float: {d}\n", .{try cfg.getFloat("test", "float")});
 }

@@ -1,13 +1,21 @@
 const std = @import("std");
-const style = @import("style.zig");
+const style = @import("../format/style.zig");
 const color = @import("../format/color.zig");
 pub const err = struct {
     level: u8,
     message: []const u8,
 
-    pub fn new(level: u8, message: []const u8, allocator: std.mem.Allocator) void {
-        const str = std.fmt.allocPrint(allocator, "{s}: {s}", .{ getPrefix(level), message }) catch message;
-        style.drawBorder(str, getColor(level), allocator) catch return;
+    pub fn new(level: u8, message: []const u8, allocator: std.mem.Allocator) !void {
+        const prefix = getPrefix(level);
+        const formattedMessage = try allocator.alloc(u8, prefix.len + message.len + 2); // Adding 2 for ": "
+        defer allocator.free(formattedMessage);
+
+        std.mem.copy(u8, formattedMessage, prefix);
+        std.mem.copy(u8, formattedMessage[prefix.len..], ": ");
+        std.mem.copy(u8, formattedMessage[prefix.len + 2 ..], message);
+
+        try style.drawBorder(formattedMessage, getColor(level), allocator);
+        std.os.exit(0); // we only want to print one out.
     }
 
     fn getColor(level: u8) []const u8 {
