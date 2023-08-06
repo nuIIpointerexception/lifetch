@@ -1,6 +1,6 @@
 const std = @import("std");
 const err = @import("error/error.zig").err;
-const Config = @import("config/ini/ini.zig").Config;
+const Config = @import("config/config.zig").Config;
 
 const print = std.debug.print;
 

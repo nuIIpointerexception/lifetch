@@ -1,5 +1,5 @@
 const std = @import("std");
-const err = @import("../../error/error.zig").err;
+const err = @import("../error/error.zig").err;
 
 pub const Entry = struct { key: []const u8, value: []const u8 };
 
@@ -18,6 +18,12 @@ pub const Section = struct {
 };
 
 pub const Config = struct {
+    const Self = @This();
+
+    sections: std.ArrayList(*Section),
+    allocator: std.mem.Allocator,
+    lines: std.ArrayList([]u8),
+
     pub const Error = struct {
         pub const Value = error{
             InvalidValue,
@@ -51,23 +57,33 @@ pub const Config = struct {
         line: usize,
         position: usize,
         msg: []const u8,
+        line_text: []const u8,
 
         const SyntaxSelf = @This();
 
         pub fn throw(self: SyntaxSelf, alloc: std.mem.Allocator) !void {
-            try err.new(3, try std.fmt.allocPrint(alloc, "SyntaxError | in config on line {d}, position {d}: {s}\n", .{
-                self.line,
-                self.position,
+            const error_line_len = self.line_text.len;
+            var error_line = try alloc.alloc(u8, error_line_len);
+            var underline = try alloc.alloc(u8, error_line_len);
+
+            @memcpy(error_line, self.line_text);
+
+            @memset(underline[0 .. self.position + 1], ' ');
+            @memset(underline[self.position + 1 ..], '~');
+            underline[self.position] = '^';
+
+            // TODO: Colors based on level.
+            try err.new(3, try std.fmt.allocPrint(alloc, "\x1b[31min config.ini: {s}\n{d}:      {s}\n        \x1b[31m{s}\x1b[0m", .{
                 self.msg,
+                self.line,
+                error_line,
+                underline,
             }), alloc);
+
+            alloc.free(error_line);
+            alloc.free(underline);
         }
     };
-
-    const Self = @This();
-
-    sections: std.ArrayList(*Section),
-    allocator: std.mem.Allocator,
-    lines: std.ArrayList([]u8),
 
     /// Parse the configuration file and return a Config instance.
     ///   - Arguments:
@@ -105,7 +121,7 @@ pub const Config = struct {
             }
 
             if (first_char == '[') {
-                var current_section_name = try readSection(alloc, line, line_num);
+                var current_section_name = try readSection(alloc, line, line_num, cfg);
                 current_section = try alloc.create(Section);
                 current_section.* = .{ .name = current_section_name, .entries = std.ArrayList(*Entry).init(alloc) };
                 try cfg.sections.append(current_section);
@@ -138,7 +154,7 @@ pub const Config = struct {
         return try parse(file, alloc);
     }
 
-    /// Deinitialize the Config instance, freeing allocated memory.
+    /// Deinitialize the Config instance, freeing allocated memory. (Although we may not need it for this project, it's generally good practice...)
     pub fn deinit(self: Self) void {
         for (self.sections.items) |section| {
             section.deinit(self.allocator);
@@ -237,14 +253,43 @@ pub const Config = struct {
         return Error.Syntax.DelimiterError;
     }
 
-    fn readSection(alloc: std.mem.Allocator, input: []u8, line_num: usize) ![]const u8 {
+    fn readSection(alloc: std.mem.Allocator, input: []u8, line_num: usize, config: Config) ![]const u8 {
         var trimmed_line = std.mem.trim(u8, input, " \t\n\r");
-        if (trimmed_line[0] != '[' or trimmed_line[trimmed_line.len - 1] != ']') {
-            const e = SyntaxError{ .line = line_num, .position = 0, .msg = "Expected section brackets" };
+
+        if (trimmed_line[0] != '[') {
+            const e = SyntaxError{
+                .line = line_num,
+                .position = 0,
+                .msg = "Missing starting '[' for section.",
+                .line_text = config.lines.items[line_num - 1],
+            };
+            try e.throw(alloc);
+        }
+        const maybe_end_bracket_pos = std.mem.indexOfScalar(u8, trimmed_line, ']');
+
+        if (maybe_end_bracket_pos == null) {
+            const e = SyntaxError{
+                .line = line_num,
+                .position = trimmed_line.len - 1,
+                .msg = "Missing ending ']' for section.",
+                .line_text = config.lines.items[line_num - 1],
+            };
             try e.throw(alloc);
         }
 
-        var section_name: []const u8 = trimmed_line[1 .. trimmed_line.len - 1];
+        const end_bracket_pos = maybe_end_bracket_pos.?;
+
+        if (end_bracket_pos != trimmed_line.len - 1) {
+            const e = SyntaxError{
+                .line = line_num,
+                .position = end_bracket_pos,
+                .msg = "Unexpected characters after section definition.",
+                .line_text = config.lines.items[line_num - 1],
+            };
+            try e.throw(alloc);
+        }
+
+        var section_name: []const u8 = trimmed_line[1..end_bracket_pos];
         section_name = std.mem.trim(u8, section_name, " \t\n\r");
 
         return section_name;

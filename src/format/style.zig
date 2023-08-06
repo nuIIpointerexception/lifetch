@@ -17,7 +17,7 @@ pub fn drawBorder(str: []const u8, color: []const u8, allocator: std.mem.Allocat
         if (line.len > max_length) {
             max_length = line.len;
         }
-        lines.append(line) catch return;
+        lines.append(l) catch return;
     }
 
     for (max_length + 2) |_| {
@@ -25,14 +25,16 @@ pub fn drawBorder(str: []const u8, color: []const u8, allocator: std.mem.Allocat
     }
 
     try buffer.concat("╮\n");
-
     for (lines.items) |i| {
-        const padding = max_length - i.len;
+        const stripped_line = stripColors(i, &allocator) catch return;
+        const padding = max_length - stripped_line.len;
         try buffer.concat("│ ");
+        try buffer.concat("\x1b[0m");
         try buffer.concat(i);
         for (padding) |_| {
             try buffer.concat(" ");
         }
+        try buffer.concat(color);
         try buffer.concat(" │\n");
     }
 
