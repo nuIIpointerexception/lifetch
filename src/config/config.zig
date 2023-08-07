@@ -1,5 +1,6 @@
 const std = @import("std");
-const err = @import("../error/error.zig").err;
+const style = @import("../format/style.zig");
+const color = @import("../format/color.zig");
 
 pub const Entry = struct { key: []const u8, value: []const u8 };
 
@@ -24,64 +25,83 @@ pub const Config = struct {
     allocator: std.mem.Allocator,
     lines: std.ArrayList([]u8),
 
-    pub const Error = struct {
-        pub const Value = error{
-            InvalidValue,
-            InvalidBoolean,
-            InvalidString,
-            InvalidFloat,
-            InvalidInteger,
-        };
-        pub const Syntax = error{
-            DelimiterError,
-            SyntaxError,
-        };
-        pub const Section = error{
-            SectionNotFound,
-            SectionDuplicate,
-        };
-        pub const Entry = error{
-            KeyNotFound,
-            KeyDuplicate,
-        };
-        pub const File = error{
-            FileNotFound,
-            FileReadError,
-        };
-        pub const Memory = error{
-            AllocationFailed,
-        };
+    pub const ErrorType = enum {
+        MissingKey,
+        MissingSection,
     };
 
-    pub const SyntaxError = struct {
-        line: usize,
-        position: usize,
+    pub const ErrorLevel = enum {
+        INFO,
+        WARN,
+        ERR,
+        FATAL,
+    };
+
+    fn getColor(level: ErrorLevel) []const u8 {
+        return switch (level) {
+            ErrorLevel.INFO => color.LIGHT_GRAY,
+            ErrorLevel.WARN => color.YELLOW,
+            ErrorLevel.ERR => color.LIGHT_RED,
+            ErrorLevel.FATAL => color.RED,
+        };
+    }
+
+    fn getPrefix(level: ErrorLevel) []const u8 {
+        return switch (level) {
+            ErrorLevel.INFO => "info",
+            ErrorLevel.WARN => "warn",
+            ErrorLevel.ERR => "error",
+            ErrorLevel.FATAL => "fatal",
+        };
+    }
+
+    pub const Error = struct {
         msg: []const u8,
-        line_text: []const u8,
+        level: ErrorLevel = ErrorLevel.WARN,
+        line_text: ?[]const u8 = null,
+        line_num: ?usize = null,
+        position: ?usize = null,
 
-        const SyntaxSelf = @This();
+        const ValueSelf = @This();
 
-        pub fn throw(self: SyntaxSelf, alloc: std.mem.Allocator) !void {
-            const error_line_len = self.line_text.len;
-            var error_line = try alloc.alloc(u8, error_line_len);
-            var underline = try alloc.alloc(u8, error_line_len);
+        pub fn throw(self: ValueSelf, alloc: std.mem.Allocator) !void {
+            const errorColor = getColor(self.level);
+            const prefix = getPrefix(self.level);
+            if (self.line_text) |line_text| {
+                if (self.position) |position| {
+                    const error_line = try std.fmt.allocPrint(alloc, "{s}", .{line_text});
+                    var underline = try alloc.alloc(u8, line_text.len);
+                    @memset(underline[0..position], ' ');
+                    underline[position] = '^';
+                    @memset(underline[position + 1 ..], '~');
 
-            @memcpy(error_line, self.line_text);
+                    const formattedMessage = try std.fmt.allocPrint(alloc, "{s}{s} in \x1b[0mconfig.ini{s}: {s}\n{any}:      {s}\n        {s}{s}\x1b[0m", .{
+                        errorColor,
+                        prefix,
+                        errorColor,
+                        self.msg,
+                        self.line_num orelse 0,
+                        error_line,
+                        errorColor,
+                        underline,
+                    });
 
-            @memset(underline[0 .. self.position + 1], ' ');
-            @memset(underline[self.position + 1 ..], '~');
-            underline[self.position] = '^';
+                    try style.drawBorder(formattedMessage, getColor(self.level), alloc);
+                    std.os.exit(0);
 
-            // TODO: Colors based on level.
-            try err.new(3, try std.fmt.allocPrint(alloc, "\x1b[31min config.ini: {s}\n{d}:      {s}\n        \x1b[31m{s}\x1b[0m", .{
+                    alloc.free(error_line);
+                    alloc.free(underline);
+                    return;
+                }
+            }
+
+            try style.drawBorder(try std.fmt.allocPrint(alloc, "{s}{s} in \x1b[0mconfig.ini{s}: {s}", .{
+                errorColor,
+                prefix,
+                errorColor,
                 self.msg,
-                self.line,
-                error_line,
-                underline,
-            }), alloc);
-
-            alloc.free(error_line);
-            alloc.free(underline);
+            }), getColor(self.level), alloc);
+            std.os.exit(0);
         }
     };
 
@@ -106,7 +126,7 @@ pub const Config = struct {
         while (try in_stream.readUntilDelimiterOrEof(&buf, '\n')) |original| {
             line_num += 1;
             var line = alloc.alloc(u8, original.len) catch {
-                return Error.Memory.AllocationFailed;
+                return error.AllocationFailed;
             };
             std.mem.copy(u8, line, original);
             try cfg.lines.append(line);
@@ -149,7 +169,7 @@ pub const Config = struct {
     ///   - Error when opening the file or parsing its contents.
     pub fn init(filename: []const u8, alloc: std.mem.Allocator) anyerror!Config {
         var file = std.fs.cwd().openFile(filename, .{}) catch {
-            return Error.File.FileNotFound;
+            return error.FileNotFound;
         };
         return try parse(file, alloc);
     }
@@ -177,9 +197,35 @@ pub const Config = struct {
                         return entry.value;
                     }
                 }
+                const lvl = ErrorLevel.FATAL;
+                const e = Error{
+                    .level = lvl,
+                    .msg = try std.fmt.allocPrint(
+                        self.allocator,
+                        "{s}key \x1b[0m{s}{s} not found @ \x1b[0m{s}{s} section.",
+                        .{
+                            getColor(lvl),
+                            key,
+                            getColor(lvl),
+                            section_name,
+                            getColor(lvl),
+                        },
+                    ),
+                };
+                try e.throw(self.allocator);
             }
         }
-        return Error.Section.SectionNotFound;
+        const e = Error{
+            .msg = try std.fmt.allocPrint(
+                self.allocator,
+                "section {s} not found.",
+                .{
+                    section_name,
+                },
+            ),
+        };
+        try e.throw(self.allocator);
+        return error.SectionNotFound;
     }
 
     /// Get a string value for a specific key in a section.
@@ -205,7 +251,8 @@ pub const Config = struct {
         } else if (std.mem.eql(u8, value, "false")) {
             return false;
         }
-        return Error.Value.InvalidBoolean;
+
+        return error.InvalidBoolean;
     }
 
     /// Get a integer value for a specific key in a section.
@@ -216,7 +263,7 @@ pub const Config = struct {
     ///   - The integer associated with the key, or an error if not found.
     pub fn getUnsigned(self: Self, section_name: []const u8, key: []const u8) !u8 {
         var value = std.fmt.parseUnsigned(u8, try get(self, section_name, key), 10) catch {
-            return Error.Value.InvalidInteger;
+            return error.InvalidInteger;
         };
         return value;
     }
@@ -229,7 +276,7 @@ pub const Config = struct {
     ///   - The float associated with the key, or an error if not found.
     pub fn getFloat(self: Self, section_name: []const u8, key: []const u8) !f32 {
         var value = std.fmt.parseFloat(f32, try get(self, section_name, key)) catch {
-            return Error.Value.InvalidFloat;
+            return error.InvalidFloat;
         };
         return value;
     }
@@ -250,29 +297,20 @@ pub const Config = struct {
             }
         }
 
-        return Error.Syntax.DelimiterError;
+        return error.DelimiterError;
     }
 
     fn readSection(alloc: std.mem.Allocator, input: []u8, line_num: usize, config: Config) ![]const u8 {
         var trimmed_line = std.mem.trim(u8, input, " \t\n\r");
 
-        if (trimmed_line[0] != '[') {
-            const e = SyntaxError{
-                .line = line_num,
-                .position = 0,
-                .msg = "Missing starting '[' for section.",
-                .line_text = config.lines.items[line_num - 1],
-            };
-            try e.throw(alloc);
-        }
         const maybe_end_bracket_pos = std.mem.indexOfScalar(u8, trimmed_line, ']');
 
         if (maybe_end_bracket_pos == null) {
-            const e = SyntaxError{
-                .line = line_num,
+            const e = Error{
                 .position = trimmed_line.len - 1,
-                .msg = "Missing ending ']' for section.",
+                .msg = "missing ending ']' for section.",
                 .line_text = config.lines.items[line_num - 1],
+                .line_num = line_num,
             };
             try e.throw(alloc);
         }
@@ -280,11 +318,11 @@ pub const Config = struct {
         const end_bracket_pos = maybe_end_bracket_pos.?;
 
         if (end_bracket_pos != trimmed_line.len - 1) {
-            const e = SyntaxError{
-                .line = line_num,
+            const e = Error{
                 .position = end_bracket_pos,
-                .msg = "Unexpected characters after section definition.",
+                .msg = "unexpected characters.",
                 .line_text = config.lines.items[line_num - 1],
+                .line_num = line_num,
             };
             try e.throw(alloc);
         }
