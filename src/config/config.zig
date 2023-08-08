@@ -25,35 +25,12 @@ pub const Config = struct {
     allocator: std.mem.Allocator,
     lines: std.ArrayList([]u8),
 
-    pub const ErrorType = enum {
-        MissingKey,
-        MissingSection,
-    };
-
     pub const ErrorLevel = enum {
         INFO,
         WARN,
         ERR,
         FATAL,
     };
-
-    fn getColor(level: ErrorLevel) []const u8 {
-        return switch (level) {
-            ErrorLevel.INFO => color.LIGHT_GRAY,
-            ErrorLevel.WARN => color.YELLOW,
-            ErrorLevel.ERR => color.LIGHT_RED,
-            ErrorLevel.FATAL => color.RED,
-        };
-    }
-
-    fn getPrefix(level: ErrorLevel) []const u8 {
-        return switch (level) {
-            ErrorLevel.INFO => "info",
-            ErrorLevel.WARN => "warn",
-            ErrorLevel.ERR => "error",
-            ErrorLevel.FATAL => "fatal",
-        };
-    }
 
     pub const Error = struct {
         msg: []const u8,
@@ -65,8 +42,19 @@ pub const Config = struct {
         const ValueSelf = @This();
 
         pub fn throw(self: ValueSelf, alloc: std.mem.Allocator) !void {
-            const errorColor = getColor(self.level);
-            const prefix = getPrefix(self.level);
+            const errorColor = switch (self.level) {
+                ErrorLevel.INFO => color.LIGHT_GRAY,
+                ErrorLevel.WARN => color.YELLOW,
+                ErrorLevel.ERR => color.LIGHT_RED,
+                ErrorLevel.FATAL => color.RED,
+            };
+            const prefix = switch (self.level) {
+                ErrorLevel.INFO => "info",
+                ErrorLevel.WARN => "warn",
+                ErrorLevel.ERR => "error",
+                ErrorLevel.FATAL => "fatal",
+            };
+
             if (self.line_text) |line_text| {
                 if (self.position) |position| {
                     const error_line = try std.fmt.allocPrint(alloc, "{s}", .{line_text});
@@ -86,8 +74,10 @@ pub const Config = struct {
                         underline,
                     });
 
-                    try style.drawBorder(formattedMessage, getColor(self.level), alloc);
-                    std.os.exit(0);
+                    try style.drawBorder(formattedMessage, errorColor, alloc);
+                    if (self.level == ErrorLevel.ERR or self.level == ErrorLevel.FATAL) {
+                        std.os.exit(0);
+                    }
 
                     alloc.free(error_line);
                     alloc.free(underline);
@@ -100,10 +90,59 @@ pub const Config = struct {
                 prefix,
                 errorColor,
                 self.msg,
-            }), getColor(self.level), alloc);
-            std.os.exit(0);
+            }), errorColor, alloc);
+            if (self.level == ErrorLevel.ERR or self.level == ErrorLevel.FATAL) {
+                std.os.exit(0);
+            }
         }
     };
+
+    const version = "1.0";
+
+    /// Updates or creates a new config.
+    pub fn update(path: []const u8, alloc: std.mem.Allocator) !void {
+        std.fs.cwd().access(path, .{}) catch {
+            try create(path);
+            return;
+        };
+
+        var old_cfg = try std.fs.cwd().openFile(path, .{});
+        defer old_cfg.close();
+
+        var reader = old_cfg.reader();
+        var vl: [100]u8 = undefined;
+        _ = try reader.readUntilDelimiterOrEof(&vl, '\n');
+        const version_line: []const u8 = std.mem.trim(u8, vl[0..], " \n\r#version: ");
+
+        if (!std.mem.eql(u8, version_line, version)) { // TODO: Fix this.
+            const backup = try std.fmt.allocPrint(alloc, "{s}-old.ini", .{path});
+            try std.fs.cwd().copyFile(path, std.fs.cwd(), backup, .{});
+
+            try create(path);
+
+            const e = Error{
+                .level = ErrorLevel.WARN,
+                .msg = try std.fmt.allocPrint(
+                    alloc,
+                    "config version mismatch: {s}-old.ini created. update your config to the newest changes.",
+                    .{
+                        path,
+                    },
+                ),
+            };
+            try e.throw(alloc);
+        }
+    }
+
+    /// Creates a new default config.
+    pub fn create(path: []const u8) !void {
+        const default_config = @embedFile("default.ini");
+
+        var file = try std.fs.cwd().createFile(path, .{});
+        defer file.close();
+
+        try file.writer().writeAll(default_config);
+    }
 
     /// Parse the configuration file and return a Config instance.
     ///   - Arguments:
@@ -113,9 +152,9 @@ pub const Config = struct {
     ///   - A Config instance representing the parsed configuration.
     ///   - Possible Errors:
     ///   - Error from file reading or memory allocation.
-    pub fn parse(file: std.fs.File, alloc: std.mem.Allocator) anyerror!Config {
-        defer file.close();
-        var reader = std.io.bufferedReader(file.reader());
+    pub fn parse(path: std.fs.File, alloc: std.mem.Allocator) anyerror!Config {
+        defer path.close();
+        var reader = std.io.bufferedReader(path.reader());
         var in_stream = reader.reader();
 
         var current_section: *Section = undefined;
@@ -161,14 +200,15 @@ pub const Config = struct {
 
     /// Initialize a Config instance from a file.
     ///   - Arguments:
-    ///   - filename: The name of the configuration file to load.
+    ///   - path: The name of the configuration file to load.
     ///   - alloc: The memory allocator to use for allocations.
     ///   - Returns:
     ///   - A Config instance representing the parsed configuration.
     ///   - Possible Errors:
     ///   - Error when opening the file or parsing its contents.
-    pub fn init(filename: []const u8, alloc: std.mem.Allocator) anyerror!Config {
-        var file = std.fs.cwd().openFile(filename, .{}) catch {
+    pub fn init(path: []const u8, alloc: std.mem.Allocator) anyerror!Config {
+        try update(path, alloc);
+        var file = std.fs.cwd().openFile(path, .{}) catch {
             return error.FileNotFound;
         };
         return try parse(file, alloc);
@@ -197,18 +237,14 @@ pub const Config = struct {
                         return entry.value;
                     }
                 }
-                const lvl = ErrorLevel.FATAL;
                 const e = Error{
-                    .level = lvl,
+                    .level = ErrorLevel.FATAL,
                     .msg = try std.fmt.allocPrint(
                         self.allocator,
-                        "{s}key \x1b[0m{s}{s} not found @ \x1b[0m{s}{s} section.",
+                        "key \"{s}\" not found @ \"{s}\" section.",
                         .{
-                            getColor(lvl),
                             key,
-                            getColor(lvl),
                             section_name,
-                            getColor(lvl),
                         },
                     ),
                 };
@@ -218,7 +254,7 @@ pub const Config = struct {
         const e = Error{
             .msg = try std.fmt.allocPrint(
                 self.allocator,
-                "section {s} not found.",
+                "section \"{s}\" not found.",
                 .{
                     section_name,
                 },
@@ -328,8 +364,6 @@ pub const Config = struct {
         }
 
         var section_name: []const u8 = trimmed_line[1..end_bracket_pos];
-        section_name = std.mem.trim(u8, section_name, " \t\n\r");
-
         return section_name;
     }
 };
