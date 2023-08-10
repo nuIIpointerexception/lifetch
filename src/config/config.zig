@@ -146,7 +146,7 @@ pub const Config = struct {
 
     /// Parse the configuration file and return a Config instance.
     ///   - Arguments:
-    ///   - file: The configuration file to parse.
+    ///   - path: The configuration file's path to parse.
     ///   - alloc: The memory allocator to use for allocations.
     ///   - Returns:
     ///   - A Config instance representing the parsed configuration.
@@ -200,7 +200,7 @@ pub const Config = struct {
 
     /// Initialize a Config instance from a file.
     ///   - Arguments:
-    ///   - path: The name of the configuration file to load.
+    ///   - path: The path of the configuration file to load.
     ///   - alloc: The memory allocator to use for allocations.
     ///   - Returns:
     ///   - A Config instance representing the parsed configuration.
