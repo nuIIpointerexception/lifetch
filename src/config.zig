@@ -28,6 +28,8 @@ const default_config =
     \\# {uptime}   - System uptime
     \\# {pkgs}     - Package count
     \\# {session}  - Wayland/X11
+    \\# {wm}       - Window manager
+    \\# {distro}   - Linux distribution
     \\#
     \\# Colors and Styles:
     \\# Basic colors: {red}text{/red}, {green}text{/green}, etc.
@@ -40,7 +42,7 @@ const default_config =
     \\
     \\format = {bold}{cyan}{user}@{host}{/cyan}{/bold} since: {uptime}
     \\{green}{shell}{/green} on {yellow}{term}{/yellow}
-    \\{magenta}{pkgs}{/magenta} pkgs on {blue}{session}{/blue}
+    \\{magenta}{pkgs}{/magenta} pkgs on {blue}{distro} / {blue}{wm} / {blue}{session}{/blue}
     \\
 ;
 
@@ -52,6 +54,8 @@ pub const Placeholder = enum {
     uptime,
     pkgs,
     session,
+    distro,
+    wm,
 
     pub fn symbol(self: Placeholder) []const u8 {
         return switch (self) {
@@ -62,6 +66,8 @@ pub const Placeholder = enum {
             .uptime => "{uptime}",
             .pkgs => "{pkgs}",
             .session => "{session}",
+            .distro => "{distro}",
+            .wm => "{wm}",
         };
     }
 };
