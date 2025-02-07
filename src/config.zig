@@ -1,10 +1,10 @@
 const std = @import("std");
 const fs = std.fs;
 const mem = std.mem;
-const process = std.process;
 const log = @import("log.zig");
 const color = @import("color.zig");
 const ComptimeStringMap = std.ComptimeStringMap;
+const os = std.os;
 
 pub const ConfigError = error{
     HomeDirNotFound,
@@ -21,15 +21,16 @@ const default_config =
     \\# Lifetch Configuration
     \\#
     \\# Format your output using these placeholders:
-    \\# {user}     - Current username
-    \\# {host}     - Hostname
-    \\# {shell}    - Current shell
-    \\# {term}     - Terminal name
-    \\# {uptime}   - System uptime
-    \\# {pkgs}     - Package count
-    \\# {session}  - Wayland/X11
-    \\# {wm}       - Window manager
-    \\# {distro}   - Linux distribution
+    \\# {user}           - Current username
+    \\# {host}           - Hostname
+    \\# {shell}          - Current shell
+    \\# {term}           - Terminal name
+    \\# {uptime}         - System uptime
+    \\# {pkgs}           - Package count
+    \\# {session}        - Wayland/X11
+    \\# {wm}             - Window manager
+    \\# {distro}         - Linux distribution (short form)
+    \\# {distro_pretty}  - Linux distribution (pretty name)
     \\#
     \\# Colors and Styles:
     \\# Basic colors: {red}text{/red}, {green}text{/green}, etc.
@@ -42,7 +43,7 @@ const default_config =
     \\
     \\format = {bold}{cyan}{user}@{host}{/cyan}{/bold} since: {uptime}
     \\{green}{shell}{/green} on {yellow}{term}{/yellow}
-    \\{magenta}{pkgs}{/magenta} pkgs on {blue}{distro} / {blue}{wm} / {blue}{session}{/blue}
+    \\{magenta}{pkgs}{/magenta} pkgs on {blue}{distro_pretty} / {blue}{wm} / {blue}{session}{/blue}
     \\
 ;
 
@@ -55,6 +56,7 @@ pub const Placeholder = enum {
     pkgs,
     session,
     distro,
+    distro_pretty,
     wm,
 
     pub fn symbol(self: Placeholder) []const u8 {
@@ -67,6 +69,7 @@ pub const Placeholder = enum {
             .pkgs => "{pkgs}",
             .session => "{session}",
             .distro => "{distro}",
+            .distro_pretty => "{distro_pretty}",
             .wm => "{wm}",
         };
     }
@@ -242,13 +245,21 @@ pub const Config = struct {
             .color_support = color.getColorSupport(),
         };
 
-        const home = process.getEnvVarOwned(arena.allocator(), "HOME") catch {
+        const env = os.environ;
+        var home_dir: []const u8 = "";
+        for (env) |entry| {
+            const entry_str = mem.span(entry);
+            if (mem.startsWith(u8, entry_str, "HOME=")) {
+                home_dir = entry_str["HOME=".len..];
+                break;
+            }
+        }
+        if (home_dir.len == 0) {
             logger.err("HOME environment variable not found", .{});
             return ConfigError.HomeDirNotFound;
-        };
-        defer arena.allocator().free(home);
+        }
 
-        const config_path = try ensureConfigExists(home, arena.allocator());
+        const config_path = try ensureConfigExists(home_dir, arena.allocator());
         defer arena.allocator().free(config_path);
 
         const file = fs.openFileAbsolute(config_path, .{ .mode = .read_only }) catch {
@@ -305,36 +316,6 @@ pub const Config = struct {
     }
 
     pub fn formatText(self: *const Config, text: []const u8, writer: anytype) !void {
-        var i: usize = 0;
-        while (i < text.len) : (i += 1) {
-            if (text[i] == '{') {
-                const end_idx = mem.indexOfScalarPos(u8, text, i, '}') orelse break;
-                const tag = text[i + 1 .. end_idx];
-
-                if (mem.startsWith(u8, tag, "/")) {
-                    try writer.writeAll("\x1b[0m");
-                    i = end_idx;
-                    continue;
-                }
-
-                if (mem.startsWith(u8, tag, "rgb(")) {
-                    if (self.color_support.truecolor) {
-                        const rgb = parseRgbTag(tag) catch continue;
-                        try writer.print("\x1b[38;2;{};{};{}m", .{ rgb.r, rgb.g, rgb.b });
-                    }
-                } else if (parseColorTag(tag)) |c| {
-                    if (self.color_support.basic) {
-                        try writer.print("\x1b[{}m", .{@intFromEnum(c)});
-                    }
-                } else if (parseStyleTag(tag)) |s| {
-                    try writer.writeAll(s);
-                } else {
-                    try writer.writeAll(text[i .. end_idx + 1]);
-                }
-                i = end_idx;
-            } else {
-                try writer.writeByte(text[i]);
-            }
-        }
+        try self.color_support.formatText(text, writer);
     }
 };

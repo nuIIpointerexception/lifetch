@@ -1,35 +1,161 @@
 const std = @import("std");
 const builtin = @import("builtin");
 const os = std.os;
+const fs = std.fs;
 
 pub const ColorSupport = struct {
     truecolor: bool = false,
     color256: bool = false,
     basic: bool = false,
 
+    const TermInfo = struct {
+        fn readTermInfo(term: []const u8) !bool {
+            if (term.len == 0) return false;
+
+            var path_buf: [std.fs.max_path_bytes]u8 = undefined;
+            const path = std.fmt.bufPrint(&path_buf, "/usr/share/terminfo/{c}/{s}", .{ term[0], term[1..] }) catch return false;
+
+            const file = fs.openFileAbsolute(path, .{ .mode = .read_only }) catch |err| switch (err) {
+                error.FileNotFound => return false,
+                else => |e| return e,
+            };
+            defer file.close();
+
+            var header_buf: [12]u8 = undefined;
+            if ((try file.readAll(&header_buf)) < 12) return false;
+            if (header_buf[0] != 0x1a and header_buf[1] != 0x01) return false;
+
+            return (@as(u16, @intCast(header_buf[10])) | (@as(u16, @intCast(header_buf[11])) << 8)) > 0;
+        }
+    };
+
+    fn parseColorTag(tag: []const u8) ?Color {
+        return switch (tag[0]) {
+            'b' => if (std.mem.eql(u8, tag, "black")) .black else if (std.mem.eql(u8, tag, "blue")) .blue else null,
+            'r' => if (std.mem.eql(u8, tag, "red")) .red else null,
+            'g' => if (std.mem.eql(u8, tag, "green")) .green else null,
+            'y' => if (std.mem.eql(u8, tag, "yellow")) .yellow else null,
+            'm' => if (std.mem.eql(u8, tag, "magenta")) .magenta else null,
+            'c' => if (std.mem.eql(u8, tag, "cyan")) .cyan else null,
+            'w' => if (std.mem.eql(u8, tag, "white")) .white else null,
+            else => null,
+        };
+    }
+
+    fn parseStyleTag(tag: []const u8) ?[]const u8 {
+        return switch (tag[0]) {
+            'b' => if (std.mem.eql(u8, tag, "bold")) Style.bold else if (std.mem.eql(u8, tag, "blink")) Style.blink else null,
+            'd' => if (std.mem.eql(u8, tag, "dim")) Style.dim else null,
+            'i' => if (std.mem.eql(u8, tag, "italic")) Style.italic else null,
+            'u' => if (std.mem.eql(u8, tag, "underline")) Style.underline else null,
+            'r' => if (std.mem.eql(u8, tag, "reverse")) Style.reverse else null,
+            'h' => if (std.mem.eql(u8, tag, "hidden")) Style.hidden else null,
+            's' => if (std.mem.eql(u8, tag, "strike")) Style.strike else null,
+            else => null,
+        };
+    }
+
+    fn parseRgbTag(tag: []const u8) !Rgb {
+        if (!std.mem.startsWith(u8, tag, "rgb(") or !std.mem.endsWith(u8, tag, ")")) {
+            return error.InvalidColorFormat;
+        }
+
+        const rgb_content = tag[4 .. tag.len - 1];
+        var values: [3]u8 = undefined;
+        var value_idx: usize = 0;
+        var num_start: usize = 0;
+
+        for (rgb_content, 0..) |c, i| {
+            if (c == ',' or i == rgb_content.len - 1) {
+                const num_end = if (i == rgb_content.len - 1) i + 1 else i;
+                const num_str = std.mem.trim(u8, rgb_content[num_start..num_end], &std.ascii.whitespace);
+                values[value_idx] = std.fmt.parseInt(u8, num_str, 10) catch return error.InvalidColorFormat;
+                value_idx += 1;
+                if (value_idx > 2) break;
+                num_start = i + 1;
+            }
+        }
+
+        if (value_idx != 3) return error.InvalidColorFormat;
+        return Rgb.init(values[0], values[1], values[2]);
+    }
+
     pub fn init() ColorSupport {
         var self = ColorSupport{};
+        const env = os.environ;
 
-        if (std.process.getEnvVarOwned(std.heap.page_allocator, "COLORTERM")) |colorterm| {
-            defer std.heap.page_allocator.free(colorterm);
-            self.truecolor = std.mem.eql(u8, colorterm, "truecolor") or
-                std.mem.eql(u8, colorterm, "24bit");
-        } else |_| {}
+        for (env) |entry| {
+            const entry_str = std.mem.span(entry);
+            if (std.mem.startsWith(u8, entry_str, "NO_COLOR=")) return self;
+        }
 
-        if (std.process.getEnvVarOwned(std.heap.page_allocator, "TERM")) |term| {
-            defer std.heap.page_allocator.free(term);
-            self.color256 = std.mem.indexOf(u8, term, "256color") != null;
-            self.basic = std.mem.indexOf(u8, term, "color") != null or
-                self.color256 or self.truecolor;
-        } else |_| {}
+        for (env) |entry| {
+            const entry_str = std.mem.span(entry);
+            if (std.mem.startsWith(u8, entry_str, "COLORTERM=")) {
+                const value = entry_str["COLORTERM=".len..];
+                if (std.mem.eql(u8, value, "truecolor") or std.mem.eql(u8, value, "24bit")) {
+                    self.truecolor = true;
+                    self.basic = true;
+                }
+                break;
+            }
+        }
 
-        if (std.process.getEnvVarOwned(std.heap.page_allocator, "NO_COLOR")) |_| {
-            self.truecolor = false;
-            self.color256 = false;
-            self.basic = false;
-        } else |_| {}
+        for (env) |entry| {
+            const entry_str = std.mem.span(entry);
+            if (std.mem.startsWith(u8, entry_str, "TERM=")) {
+                const term = entry_str["TERM=".len..];
+                if (TermInfo.readTermInfo(term)) |has_colors| {
+                    if (has_colors) {
+                        self.basic = true;
+                        self.color256 = std.mem.indexOf(u8, term, "256color") != null;
+                    }
+                } else |_| {
+                    self.color256 = std.mem.indexOf(u8, term, "256color") != null;
+                    if (self.color256) self.basic = true;
+                    if (!self.basic) {
+                        self.basic = std.mem.indexOf(u8, term, "color") != null or self.truecolor;
+                    }
+                }
+                break;
+            }
+        }
 
         return self;
+    }
+
+    pub fn formatText(self: *const ColorSupport, text: []const u8, writer: anytype) !void {
+        var i: usize = 0;
+        while (i < text.len) : (i += 1) {
+            if (text[i] == '{') {
+                const end_idx = std.mem.indexOfScalarPos(u8, text, i, '}') orelse break;
+                const tag = text[i + 1 .. end_idx];
+
+                if (std.mem.startsWith(u8, tag, "/")) {
+                    try writer.writeAll("\x1b[0m");
+                    i = end_idx;
+                    continue;
+                }
+
+                if (std.mem.startsWith(u8, tag, "rgb(")) {
+                    if (self.truecolor) {
+                        const rgb = ColorSupport.parseRgbTag(tag) catch continue;
+                        try writer.print("\x1b[38;2;{};{};{}m", .{ rgb.r, rgb.g, rgb.b });
+                    }
+                } else if (ColorSupport.parseColorTag(tag)) |c| {
+                    if (self.basic) {
+                        try writer.writeAll(c.ansiSequence());
+                    }
+                } else if (ColorSupport.parseStyleTag(tag)) |s| {
+                    try writer.writeAll(s);
+                } else {
+                    try writer.writeAll(text[i .. end_idx + 1]);
+                }
+                i = end_idx;
+            } else {
+                try writer.writeByte(text[i]);
+            }
+        }
     }
 };
 
@@ -70,14 +196,7 @@ pub const Color = enum(u8) {
     white = 37,
     reset = 0,
 
-    pub inline fn bright(self: Color) u8 {
-        return switch (self) {
-            .reset => 0,
-            else => @intFromEnum(self) + 60,
-        };
-    }
-
-    pub inline fn ansiSequence(self: Color) []const u8 {
+    pub fn ansiSequence(self: Color) []const u8 {
         return switch (self) {
             .black => "\x1b[30m",
             .red => "\x1b[31m",
@@ -89,33 +208,6 @@ pub const Color = enum(u8) {
             .white => "\x1b[37m",
             .reset => "\x1b[0m",
         };
-    }
-
-    pub inline fn format(
-        self: Color,
-        comptime fmt: []const u8,
-        options: std.fmt.FormatOptions,
-        writer: anytype,
-    ) !void {
-        _ = fmt;
-        _ = options;
-        try writer.writeAll(self.ansiSequence());
-    }
-
-    pub inline fn fg(self: Color) Formatter {
-        return .{ .kind = .basic_fg, .code = @intFromEnum(self) };
-    }
-
-    pub inline fn bg(self: Color) Formatter {
-        return .{ .kind = .basic_bg, .code = @intFromEnum(self) + 10 };
-    }
-
-    pub inline fn bright_fg(self: Color) Formatter {
-        return .{ .kind = .basic_fg, .code = self.bright() };
-    }
-
-    pub inline fn bright_bg(self: Color) Formatter {
-        return .{ .kind = .basic_bg, .code = self.bright() + 10 };
     }
 };
 
@@ -213,12 +305,12 @@ pub const Style = struct {
     }
 };
 
+// Initialize color support at runtime
 var color_support: ?ColorSupport = null;
 
 pub fn getColorSupport() ColorSupport {
-    if (color_support) |cs| {
-        return cs;
-    }
-    color_support = ColorSupport.init();
-    return color_support.?;
+    return color_support orelse {
+        color_support = ColorSupport.init();
+        return color_support.?;
+    };
 }

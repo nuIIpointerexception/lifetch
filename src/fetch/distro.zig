@@ -1,6 +1,7 @@
 const std = @import("std");
 const fs = std.fs;
 const mem = std.mem;
+const hash_map = std.hash_map;
 const log = @import("../log.zig");
 const utils = @import("../utils.zig");
 
@@ -15,13 +16,13 @@ pub const DistroError = error{
 } || fs.File.OpenError;
 
 const ReleaseInfo = struct {
-    name: []const u8,
+    pretty_name: []const u8,
     version: []const u8,
     id: []const u8,
 };
 
 pub const Distro = struct {
-    name: []const u8,
+    pretty_name: []const u8,
     version: []const u8,
     id: []const u8,
     allocator: std.mem.Allocator,
@@ -35,29 +36,44 @@ pub const Distro = struct {
 
     const DistroFile = struct {
         path: []const u8,
-        name: []const u8,
+        pretty_name: []const u8,
         id: []const u8,
     };
 
     const distro_files = [_]DistroFile{
-        .{ .path = "/etc/arch-release", .name = "Arch Linux", .id = "arch" },
-        .{ .path = "/etc/gentoo-release", .name = "Gentoo", .id = "gentoo" },
-        .{ .path = "/etc/fedora-release", .name = "Fedora", .id = "fedora" },
-        .{ .path = "/etc/debian_version", .name = "Debian", .id = "debian" },
-        .{ .path = "/etc/alpine-release", .name = "Alpine", .id = "alpine" },
+        .{ .path = "/etc/arch-release", .pretty_name = "Arch Linux", .id = "arch" },
+        .{ .path = "/etc/gentoo-release", .pretty_name = "Gentoo", .id = "gentoo" },
+        .{ .path = "/etc/fedora-release", .pretty_name = "Fedora", .id = "fedora" },
+        .{ .path = "/etc/debian_version", .pretty_name = "Debian", .id = "debian" },
+        .{ .path = "/etc/alpine-release", .pretty_name = "Alpine", .id = "alpine" },
+    };
+
+    const DistroMapping = struct {
+        id: []const u8,
+        pretty_name: []const u8,
+    };
+
+    const distro_mappings = [_]DistroMapping{
+        .{ .id = "arch", .pretty_name = "Arch Linux" },
+        .{ .id = "alpine", .pretty_name = "Alpine" },
+        .{ .id = "debian", .pretty_name = "Debian" },
+        .{ .id = "endeavouros", .pretty_name = "EndeavourOS" },
+        .{ .id = "fedora", .pretty_name = "Fedora" },
+        .{ .id = "gentoo", .pretty_name = "Gentoo" },
+        .{ .id = "manjaro", .pretty_name = "Manjaro" },
+        .{ .id = "nixos", .pretty_name = "NixOS" },
+        .{ .id = "ubuntu", .pretty_name = "Ubuntu" },
+        .{ .id = "void", .pretty_name = "Void" },
     };
 
     fn getDistroName(id: []const u8) []const u8 {
-        if (mem.eql(u8, id, "arch")) return "Arch Linux";
-        if (mem.eql(u8, id, "debian")) return "Debian";
-        if (mem.eql(u8, id, "ubuntu")) return "Ubuntu";
-        if (mem.eql(u8, id, "fedora")) return "Fedora";
-        if (mem.eql(u8, id, "gentoo")) return "Gentoo";
-        if (mem.eql(u8, id, "alpine")) return "Alpine";
-        if (mem.eql(u8, id, "manjaro")) return "Manjaro";
-        if (mem.eql(u8, id, "endeavouros")) return "EndeavourOS";
-        if (mem.eql(u8, id, "void")) return "Void";
-        if (mem.eql(u8, id, "nixos")) return "NixOS";
+        if (id.len == 0) return id;
+
+        for (distro_mappings) |mapping| {
+            if (id.len == mapping.id.len and mem.eql(u8, id, mapping.id)) {
+                return mapping.pretty_name;
+            }
+        }
         return id;
     }
 
@@ -73,7 +89,7 @@ pub const Distro = struct {
             file.close();
 
             return Distro{
-                .name = try allocator.dupe(u8, df.name),
+                .pretty_name = try allocator.dupe(u8, df.pretty_name),
                 .version = try allocator.dupe(u8, ""),
                 .id = try allocator.dupe(u8, df.id),
                 .allocator = allocator,
@@ -84,7 +100,7 @@ pub const Distro = struct {
         for (release_files) |path| {
             if (readReleaseFile(allocator, path, &release_buf)) |info| {
                 return Distro{
-                    .name = info.name,
+                    .pretty_name = info.pretty_name,
                     .version = info.version,
                     .id = info.id,
                     .allocator = allocator,
@@ -113,47 +129,55 @@ pub const Distro = struct {
         var lines = mem.splitScalar(u8, content, '\n');
         while (lines.next()) |line| {
             if (line.len == 0 or line[0] == '#') continue;
-            if (mem.indexOf(u8, line, "=")) |equals_pos| {
-                const key = mem.trim(u8, line[0..equals_pos], " ");
-                var value = mem.trim(u8, line[equals_pos + 1 ..], " ");
 
-                if (value.len >= 2 and value[0] == '"' and value[value.len - 1] == '"') {
-                    value = value[1 .. value.len - 1];
-                }
+            const equals_pos = mem.indexOfScalar(u8, line, '=') orelse continue;
+            if (equals_pos == 0 or equals_pos == line.len - 1) continue;
 
-                if (name_value != null and version_value != null and id_value != null) break;
+            const key = mem.trim(u8, line[0..equals_pos], " ");
+            var value = mem.trim(u8, line[equals_pos + 1 ..], " ");
 
-                if (mem.eql(u8, key, "NAME") and name_value == null) {
+            if (value.len >= 2 and value[0] == '"' and value[value.len - 1] == '"') {
+                value = value[1 .. value.len - 1];
+            }
+
+            if (name_value != null and version_value != null and id_value != null) break;
+
+            switch (key[0]) {
+                'N' => if (mem.eql(u8, key, "NAME") and name_value == null) {
                     name_value = try allocator.dupe(u8, value);
-                } else if (mem.eql(u8, key, "VERSION_ID") and version_value == null) {
+                },
+                'V' => if (mem.eql(u8, key, "VERSION_ID") and version_value == null) {
                     version_value = try allocator.dupe(u8, value);
-                } else if (mem.eql(u8, key, "ID") and id_value == null) {
+                },
+                'I' => if (mem.eql(u8, key, "ID") and id_value == null) {
                     id_value = try allocator.dupe(u8, value);
-                }
+                },
+                else => continue,
             }
         }
 
         const id = id_value orelse try allocator.dupe(u8, "linux");
-        const name = if (name_value) |n|
+        const pretty_name = if (name_value) |n|
             n
         else
             try allocator.dupe(u8, getDistroName(id));
 
         return ReleaseInfo{
-            .name = name,
+            .pretty_name = pretty_name,
             .version = version_value orelse try allocator.dupe(u8, ""),
             .id = id,
         };
     }
 
     pub fn deinit(self: *Distro) void {
-        self.allocator.free(self.name);
+        self.allocator.free(self.pretty_name);
         self.allocator.free(self.version);
         self.allocator.free(self.id);
     }
 
     pub fn formatComponent(self: Distro, allocator: std.mem.Allocator, input: []const u8) ![]const u8 {
-        var result = try utils.replaceAlloc(allocator, input, "{distro}", self.name);
+        var result = try utils.replaceAlloc(allocator, input, "{distro}", self.id);
+        result = try utils.replaceAlloc(allocator, result, "{distro_pretty}", self.pretty_name);
         result = try utils.replaceAlloc(allocator, result, "{distro_version}", self.version);
         return result;
     }

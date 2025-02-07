@@ -2,22 +2,11 @@ const std = @import("std");
 const builtin = @import("builtin");
 const time = std.time;
 const fetch = @import("fetch/root.zig");
-const fs = std.fs;
 
 fn runFetch(writer: anytype) !void {
     var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
     defer arena.deinit();
     const allocator = arena.allocator();
-
-    const home_dir = std.process.getEnvVarOwned(allocator, "HOME") catch |err| {
-        return err;
-    };
-    defer allocator.free(home_dir);
-
-    const environ_file = fs.cwd().openFile("/proc/self/environ", .{ .mode = .read_only }) catch |err| {
-        return err;
-    };
-    environ_file.close();
 
     var fetch_info = fetch.Fetch.init(allocator) catch |err| {
         try writer.print("Error initializing fetch: {}\n", .{err});
@@ -29,7 +18,7 @@ fn runFetch(writer: anytype) !void {
 }
 
 fn timeIt(comptime fun: anytype, args: anytype) !void {
-    if (builtin.mode == .Debug) {
+    if (builtin.mode == .Debug or builtin.mode == .ReleaseSafe) {
         const start = time.nanoTimestamp();
         try @call(.auto, fun, args);
         const end = time.nanoTimestamp();

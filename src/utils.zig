@@ -41,7 +41,6 @@ pub inline fn findPrefix(bytes: []const u8, pattern: []const u8) ?usize {
 }
 
 pub inline fn getEnvValue(content: []const u8, comptime prefix: []const u8) ?[]const u8 {
-    @setRuntimeSafety(false);
     return if (findPrefix(content, prefix)) |pos| blk: {
         const start = pos + prefix.len;
         const end = if (mem.indexOfScalar(u8, content[start..], 0)) |e|
@@ -54,7 +53,6 @@ pub inline fn getEnvValue(content: []const u8, comptime prefix: []const u8) ?[]c
 }
 
 pub inline fn formatUptime(seconds: u64, buf: []u8) []const u8 {
-    @setRuntimeSafety(false);
     const days = seconds / (24 * 60 * 60);
     const hours = (seconds % (24 * 60 * 60)) / (60 * 60);
     const minutes = (seconds % (60 * 60)) / 60;
