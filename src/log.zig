@@ -36,9 +36,7 @@ pub const ScopedLogger = struct {
     const Self = @This();
 
     pub fn init(scope: []const u8) Self {
-        return .{
-            .scope = scope,
-        };
+        return .{ .scope = scope };
     }
 
     pub fn setLevel(self: *Self, level: LogLevel) void {
@@ -57,11 +55,7 @@ pub const ScopedLogger = struct {
         return self.enabled and @intFromEnum(level) >= @intFromEnum(self.min_level);
     }
 
-    fn formatTime(_: []u8, _: i64) []const u8 {
-        return "ss";
-    }
-
-    fn log(self: *Self, level: LogLevel, comptime fmt: []const u8, args: anytype) void {
+    pub fn log(self: *Self, level: LogLevel, comptime fmt: []const u8, args: anytype) void {
         if (!self.shouldLog(level)) return;
 
         const stderr = std.io.getStdErr().writer();
@@ -75,7 +69,7 @@ pub const ScopedLogger = struct {
             "\x1b[0m",
         }) catch return;
 
-        if (std.fmt.bufPrint(self.buffer[8..], fmt, args)) |msg| {
+        if (std.fmt.bufPrint(self.buffer[0..], fmt, args)) |msg| {
             stderr.print("{s}\n", .{msg}) catch return;
         } else |_| {
             stderr.print(fmt ++ "\n", args) catch return;

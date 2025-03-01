@@ -1,10 +1,9 @@
 const std = @import("std");
 const fs = std.fs;
 const mem = std.mem;
+
 const log = @import("../log.zig");
 const utils = @import("../utils.zig");
-
-pub const max_uptime_len = 32;
 
 pub const UptimeError = error{
     UptimeReadFailed,
@@ -38,8 +37,9 @@ pub const Uptime = struct {
         };
 
         const seconds = @as(u64, @intFromFloat(uptime_float));
-        var format_buf: [max_uptime_len]u8 = undefined;
-        const formatted = try formatUptime(seconds, &format_buf);
+        const format_buf = try allocator.alloc(u8, 64);
+        defer allocator.free(format_buf);
+        const formatted = try formatUptime(seconds, format_buf);
         const duped_formatted = try allocator.dupe(u8, formatted);
 
         return Uptime{
@@ -55,25 +55,23 @@ pub const Uptime = struct {
     }
 
     pub fn formatComponent(self: Uptime, allocator: std.mem.Allocator, input: []const u8) ![]const u8 {
-        return utils.replaceAlloc(allocator, input, "{uptime}", self.formatted);
+        return utils.formatReplace(allocator, input, "uptime", self.formatted);
     }
 
     fn formatUptime(seconds: u64, buf: []u8) ![]const u8 {
-        const days = seconds / (24 * 60 * 60);
-        const hours = (seconds % (24 * 60 * 60)) / (60 * 60);
-        const minutes = (seconds % (60 * 60)) / 60;
+        const minutes = seconds / 60;
+        const hours = minutes / 60;
+        const days = hours / 24;
+
+        const display_minutes = minutes % 60;
+        const display_hours = hours % 24;
 
         if (days > 0) {
-            return std.fmt.bufPrint(buf, "{d}d {d}h {d}m", .{ days, hours, minutes });
+            return std.fmt.bufPrint(buf, "{d}d {d}h {d}m", .{ days, display_hours, display_minutes });
         } else if (hours > 0) {
-            return std.fmt.bufPrint(buf, "{d}h {d}m", .{ hours, minutes });
+            return std.fmt.bufPrint(buf, "{d}h {d}m", .{ hours, display_minutes });
         } else {
             return std.fmt.bufPrint(buf, "{d}m", .{minutes});
         }
     }
 };
-
-comptime {
-    if (max_uptime_len > 64) @compileError("Uptime buffer too large");
-    if (!std.math.isPowerOfTwo(max_uptime_len)) @compileError("Buffer size must be power of two for optimal alignment");
-}

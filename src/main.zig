@@ -1,46 +1,53 @@
 const std = @import("std");
-const builtin = @import("builtin");
 const time = std.time;
+const builtin = @import("builtin");
+
+const debug = @import("debug.zig");
+const log = @import("log.zig");
 const fetch = @import("fetch/root.zig");
 
-fn runFetch(writer: anytype) !void {
-    var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
-    defer arena.deinit();
-    const allocator = arena.allocator();
+var logger = log.ScopedLogger.init("lifetch/main");
 
-    var fetch_info = fetch.Fetch.init(allocator) catch |err| {
-        try writer.print("Error initializing fetch: {}\n", .{err});
-        return err;
-    };
+var debug_allocator: std.heap.DebugAllocator(.{}) = .init;
+
+fn runFetch(writer: anytype, allocator: std.mem.Allocator) !void {
+    if (builtin.mode == .Debug) {
+        logger.warn("RUNNING IN DEBUG MODE", .{});
+    }
+
+    var fetch_info = try fetch.Fetch.init(allocator);
     defer fetch_info.deinit();
 
     try writer.print("{s}", .{fetch_info});
 }
 
-fn timeIt(comptime fun: anytype, args: anytype) !void {
-    if (builtin.mode == .Debug or builtin.mode == .ReleaseSafe) {
-        const start = time.nanoTimestamp();
-        try @call(.auto, fun, args);
-        const end = time.nanoTimestamp();
-
-        const elapsed_ns = @as(f64, @floatFromInt(end - start));
-        const stdout = std.io.getStdOut().writer();
-        try stdout.print("\nfetch took {d:.3}ms\n", .{elapsed_ns / 1_000_000.0});
-    } else {
-        try @call(.auto, fun, args);
-    }
-}
-
 pub fn main() !void {
+    const allocator, const is_debug = gpa: {
+        if (@import("builtin").os.tag == .wasi) break :gpa .{ std.heap.wasm_allocator, false };
+        break :gpa switch (builtin.mode) {
+            .Debug, .ReleaseSafe => .{ debug_allocator.allocator(), true },
+            .ReleaseFast, .ReleaseSmall => .{ std.heap.smp_allocator, false },
+        };
+    };
+    defer if (is_debug) {
+        _ = debug_allocator.deinit();
+    };
+
     const stdout_file = std.io.getStdOut().writer();
     var bw = std.io.bufferedWriter(stdout_file);
     const stdout = bw.writer();
 
-    timeIt(runFetch, .{stdout}) catch |err| {
-        const stderr = std.io.getStdErr().writer();
-        try stderr.print("Fatal error: {}\n", .{err});
-        try bw.flush();
+    if (builtin.mode == .Debug) {
+        logger.warn("RUNNING IN DEBUG MODE", .{});
+    }
+
+    var fetch_info = try fetch.Fetch.init(allocator);
+    defer fetch_info.deinit();
+
+    stdout.print("{s}", .{fetch_info}) catch |err| {
+        logger.err("Failed to print fetch info: {}", .{err});
         return err;
     };
+
     try bw.flush();
 }

@@ -1,19 +1,32 @@
 # Maintainer: viable <hi@viable.gg>
-pkgname=lifetch
-pkgver=0.1.0
+pkgname=lifetch-git
+pkgver=0.1.1.r23.gffcbaad
 pkgrel=1
 pkgdesc="Fast system information fetcher written in zig"
-arch=('x86_64')
+arch=('x86_64' 'aarch64')
 url="https://github.com/nuiipointerexception/lifetch"
 license=('MIT')
-depends=()
-makedepends=('zig')
+depends=('glibc')
+makedepends=('zig' 'git')
 source=("git+${url}.git")
 sha256sums=('SKIP')
 
+pkgver() {
+    cd "$pkgname"
+    git describe --long --tags --abbrev=7 --match="v*" HEAD 2>/dev/null || \
+    echo "0.1.1.r$(git rev-list --count HEAD).g$(git rev-parse --short=7 HEAD)"
+}
+
+prepare() {
+    cd "$pkgname"
+}
+
 build() {
     cd "$pkgname"
-    zig build -Doptimize=ReleaseSafe
+    zig build \
+        --summary all \
+        -Doptimize=ReleaseFast \
+        -Dcpu=native
 }
 
 package() {

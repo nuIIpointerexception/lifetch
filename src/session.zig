@@ -1,6 +1,7 @@
 const std = @import("std");
 const fs = std.fs;
 const mem = std.mem;
+
 const log = @import("../log.zig");
 const utils = @import("../utils.zig");
 
@@ -19,37 +20,31 @@ pub const Session = struct {
     const display_prefix = "DISPLAY=";
     const wayland_prefix = "WAYLAND_DISPLAY=";
 
-    fn readEnviron(buf: []u8) ![]const u8 {
-        @setRuntimeSafety(false);
+    fn readEnviron() ![]const u8 {
+        var environ_buf: [4096]u8 = undefined;
         const file = try fs.cwd().openFile("/proc/self/environ", .{ .mode = .read_only });
         defer file.close();
-        return file.readAll(buf) catch return error.EnvironReadFailed;
+
+        const bytes_read = file.readAll(&environ_buf) catch return error.EnvironReadFailed;
+        return environ_buf[0..bytes_read];
     }
 
     pub fn init(allocator: std.mem.Allocator) SessionError!Session {
-        @setRuntimeSafety(false);
         const logger = log.ScopedLogger.init("session");
 
-        var environ_buf: [4096]u8 = undefined;
-        const bytes_read = try readEnviron(&environ_buf);
-        const environ_content = environ_buf[0..bytes_read];
+        const environ_content = try readEnviron();
 
         var desktop_value: []const u8 = "unknown";
         var display_value: []const u8 = "tty";
 
-        var start: usize = 0;
-        while (start < environ_content.len) {
-            const end = if (mem.indexOfScalarPos(u8, environ_content, start, 0)) |e| e else environ_content.len;
-            const entry = environ_content[start..end];
+        if (utils.getEnvValue(environ_content, desktop_prefix)) |value| {
+            if (value.len > 0) desktop_value = value;
+        }
 
-            if (mem.startsWith(u8, entry, desktop_prefix)) {
-                desktop_value = entry[desktop_prefix.len..];
-            } else if (mem.startsWith(u8, entry, wayland_prefix)) {
-                display_value = "wayland";
-            } else if (display_value.len == 3 and mem.startsWith(u8, entry, display_prefix)) {
-                display_value = "x11";
-            }
-            start = end + 1;
+        if (utils.getEnvValue(environ_content, wayland_prefix)) |value| {
+            if (value.len > 0) display_value = "wayland";
+        } else if (utils.getEnvValue(environ_content, display_prefix)) |value| {
+            if (value.len > 0) display_value = "x11";
         }
 
         return Session{

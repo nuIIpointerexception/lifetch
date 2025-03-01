@@ -1,6 +1,7 @@
 const std = @import("std");
 const fs = std.fs;
 const mem = std.mem;
+
 const log = @import("../log.zig");
 const utils = @import("../utils.zig");
 
@@ -61,8 +62,27 @@ pub const Session = struct {
     }
 
     pub fn formatComponent(self: Session, allocator: std.mem.Allocator, input: []const u8) ![]const u8 {
-        var result = try utils.replaceAlloc(allocator, input, "{de}", self.desktop);
-        result = try utils.replaceAlloc(allocator, result, "{session}", self.display_server);
-        return result;
+        const de_exists = std.mem.indexOf(u8, input, "{de}") != null;
+        const session_exists = std.mem.indexOf(u8, input, "{session}") != null;
+
+        if (!de_exists and !session_exists) {
+            return allocator.dupe(u8, input);
+        }
+
+        if (de_exists and !session_exists) {
+            return utils.formatReplace(allocator, input, "de", self.desktop);
+        }
+
+        if (!de_exists and session_exists) {
+            return utils.formatReplace(allocator, input, "session", self.display_server);
+        }
+
+        var ctx = utils.FormatContext.init(allocator);
+        defer ctx.deinit();
+
+        try ctx.add("de", self.desktop);
+        try ctx.add("session", self.display_server);
+
+        return ctx.format(input);
     }
 };

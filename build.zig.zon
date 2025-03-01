@@ -1,9 +1,12 @@
 .{
     .name = "lifetch",
-    .version = "0.0.1",
+    .version = "0.1.1",
     .paths = .{
         "build.zig",
         "build.zig.zon",
         "src",
+        "config.ini",
+        "README.md",
+        "LICENSE",
     },
 }

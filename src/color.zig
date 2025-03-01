@@ -1,7 +1,7 @@
 const std = @import("std");
-const builtin = @import("builtin");
 const os = std.os;
 const fs = std.fs;
+const builtin = @import("builtin");
 
 pub const ColorSupport = struct {
     truecolor: bool = false,
@@ -29,7 +29,7 @@ pub const ColorSupport = struct {
         }
     };
 
-    fn parseColorTag(tag: []const u8) ?Color {
+    pub fn parseColorTag(tag: []const u8) ?Color {
         return switch (tag[0]) {
             'b' => if (std.mem.eql(u8, tag, "black")) .black else if (std.mem.eql(u8, tag, "blue")) .blue else null,
             'r' => if (std.mem.eql(u8, tag, "red")) .red else null,
@@ -42,7 +42,7 @@ pub const ColorSupport = struct {
         };
     }
 
-    fn parseStyleTag(tag: []const u8) ?[]const u8 {
+    pub fn parseStyleTag(tag: []const u8) ?[]const u8 {
         return switch (tag[0]) {
             'b' => if (std.mem.eql(u8, tag, "bold")) Style.bold else if (std.mem.eql(u8, tag, "blink")) Style.blink else null,
             'd' => if (std.mem.eql(u8, tag, "dim")) Style.dim else null,
@@ -55,7 +55,7 @@ pub const ColorSupport = struct {
         };
     }
 
-    fn parseRgbTag(tag: []const u8) !Rgb {
+    pub fn parseRgbTag(tag: []const u8) !Rgb {
         if (!std.mem.startsWith(u8, tag, "rgb(") or !std.mem.endsWith(u8, tag, ")")) {
             return error.InvalidColorFormat;
         }
@@ -126,34 +126,56 @@ pub const ColorSupport = struct {
 
     pub fn formatText(self: *const ColorSupport, text: []const u8, writer: anytype) !void {
         var i: usize = 0;
-        while (i < text.len) : (i += 1) {
-            if (text[i] == '{') {
-                const end_idx = std.mem.indexOfScalarPos(u8, text, i, '}') orelse break;
+        const len = text.len;
+
+        while (i < len) {
+            if (text[i] == '{' and i + 1 < len) {
+                const start_idx = i;
+                const end_idx = std.mem.indexOfScalarPos(u8, text, i, '}') orelse {
+                    try writer.writeByte(text[i]);
+                    i += 1;
+                    continue;
+                };
+
                 const tag = text[i + 1 .. end_idx];
 
-                if (std.mem.startsWith(u8, tag, "/")) {
+                if (tag.len > 0 and tag[0] == '/') {
                     try writer.writeAll("\x1b[0m");
-                    i = end_idx;
+                    i = end_idx + 1;
                     continue;
                 }
 
+                var processed = false;
+
                 if (std.mem.startsWith(u8, tag, "rgb(")) {
                     if (self.truecolor) {
-                        const rgb = ColorSupport.parseRgbTag(tag) catch continue;
-                        try writer.print("\x1b[38;2;{};{};{}m", .{ rgb.r, rgb.g, rgb.b });
+                        if (ColorSupport.parseRgbTag(tag)) |rgb| {
+                            try writer.print("\x1b[38;2;{};{};{}m", .{ rgb.r, rgb.g, rgb.b });
+                            processed = true;
+                        } else |_| {}
                     }
-                } else if (ColorSupport.parseColorTag(tag)) |c| {
-                    if (self.basic) {
+                } else if (self.basic) {
+                    if (ColorSupport.parseColorTag(tag)) |c| {
                         try writer.writeAll(c.ansiSequence());
+                        processed = true;
                     }
-                } else if (ColorSupport.parseStyleTag(tag)) |s| {
-                    try writer.writeAll(s);
-                } else {
-                    try writer.writeAll(text[i .. end_idx + 1]);
                 }
-                i = end_idx;
+
+                if (!processed) {
+                    if (ColorSupport.parseStyleTag(tag)) |s| {
+                        try writer.writeAll(s);
+                        processed = true;
+                    }
+                }
+
+                if (!processed) {
+                    try writer.writeAll(text[start_idx .. end_idx + 1]);
+                }
+
+                i = end_idx + 1;
             } else {
                 try writer.writeByte(text[i]);
+                i += 1;
             }
         }
     }
@@ -305,7 +327,6 @@ pub const Style = struct {
     }
 };
 
-// Initialize color support at runtime
 var color_support: ?ColorSupport = null;
 
 pub fn getColorSupport() ColorSupport {

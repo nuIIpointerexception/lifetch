@@ -1,10 +1,12 @@
 const std = @import("std");
 const fs = std.fs;
 const mem = std.mem;
-const log = @import("log.zig");
-const color = @import("color.zig");
-const ComptimeStringMap = std.ComptimeStringMap;
 const os = std.os;
+
+const color = @import("color.zig");
+const log = @import("log.zig");
+
+const default_config = @embedFile("config");
 
 pub const ConfigError = error{
     HomeDirNotFound,
@@ -16,36 +18,6 @@ pub const ConfigError = error{
     InvalidColorFormat,
     InvalidStyleFormat,
 };
-
-const default_config =
-    \\# Lifetch Configuration
-    \\#
-    \\# Format your output using these placeholders:
-    \\# {user}           - Current username
-    \\# {host}           - Hostname
-    \\# {shell}          - Current shell
-    \\# {term}           - Terminal name
-    \\# {uptime}         - System uptime
-    \\# {pkgs}           - Package count
-    \\# {session}        - Wayland/X11
-    \\# {wm}             - Window manager
-    \\# {distro}         - Linux distribution (short form)
-    \\# {distro_pretty}  - Linux distribution (pretty name)
-    \\#
-    \\# Colors and Styles:
-    \\# Basic colors: {red}text{/red}, {green}text{/green}, etc.
-    \\# RGB colors: {rgb(255,0,0)}text{/rgb}
-    \\# Styles: {bold}text{/bold}, {underline}text{/underline}, etc.
-    \\#
-    \\# Example formats:
-    \\# format = "{bold}{red}{user}@{host}{/red}{/bold} on {green}{term}{/green}"
-    \\# format = "{rgb(255,165,0)}os{/rgb}: {host} | {bold}shell{/bold}: {shell}"
-    \\
-    \\format = {bold}{cyan}{user}@{host}{/cyan}{/bold} since: {uptime}
-    \\{green}{shell}{/green} on {yellow}{term}{/yellow}
-    \\{magenta}{pkgs}{/magenta} pkgs on {blue}{distro_pretty} / {blue}{wm} / {blue}{session}{/blue}
-    \\
-;
 
 pub const Placeholder = enum {
     user,
@@ -75,30 +47,28 @@ pub const Placeholder = enum {
     }
 };
 
-fn parseColorTag(tag: []const u8) ?color.Color {
-    return switch (tag[0]) {
-        'b' => if (mem.eql(u8, tag, "black")) .black else if (mem.eql(u8, tag, "blue")) .blue else null,
-        'r' => if (mem.eql(u8, tag, "red")) .red else null,
-        'g' => if (mem.eql(u8, tag, "green")) .green else null,
-        'y' => if (mem.eql(u8, tag, "yellow")) .yellow else null,
-        'm' => if (mem.eql(u8, tag, "magenta")) .magenta else null,
-        'c' => if (mem.eql(u8, tag, "cyan")) .cyan else null,
-        'w' => if (mem.eql(u8, tag, "white")) .white else null,
-        else => null,
-    };
+fn getColorForTag(tag: []const u8) ?color.Color {
+    if (mem.eql(u8, tag, "black")) return .black;
+    if (mem.eql(u8, tag, "red")) return .red;
+    if (mem.eql(u8, tag, "green")) return .green;
+    if (mem.eql(u8, tag, "yellow")) return .yellow;
+    if (mem.eql(u8, tag, "blue")) return .blue;
+    if (mem.eql(u8, tag, "magenta")) return .magenta;
+    if (mem.eql(u8, tag, "cyan")) return .cyan;
+    if (mem.eql(u8, tag, "white")) return .white;
+    return null;
 }
 
-fn parseStyleTag(tag: []const u8) ?[]const u8 {
-    return switch (tag[0]) {
-        'b' => if (mem.eql(u8, tag, "bold")) color.Style.bold else if (mem.eql(u8, tag, "blink")) color.Style.blink else null,
-        'd' => if (mem.eql(u8, tag, "dim")) color.Style.dim else null,
-        'i' => if (mem.eql(u8, tag, "italic")) color.Style.italic else null,
-        'u' => if (mem.eql(u8, tag, "underline")) color.Style.underline else null,
-        'r' => if (mem.eql(u8, tag, "reverse")) color.Style.reverse else null,
-        'h' => if (mem.eql(u8, tag, "hidden")) color.Style.hidden else null,
-        's' => if (mem.eql(u8, tag, "strike")) color.Style.strike else null,
-        else => null,
-    };
+fn getStyleForTag(tag: []const u8) ?[]const u8 {
+    if (mem.eql(u8, tag, "bold")) return color.Style.bold;
+    if (mem.eql(u8, tag, "dim")) return color.Style.dim;
+    if (mem.eql(u8, tag, "italic")) return color.Style.italic;
+    if (mem.eql(u8, tag, "underline")) return color.Style.underline;
+    if (mem.eql(u8, tag, "blink")) return color.Style.blink;
+    if (mem.eql(u8, tag, "reverse")) return color.Style.reverse;
+    if (mem.eql(u8, tag, "hidden")) return color.Style.hidden;
+    if (mem.eql(u8, tag, "strike")) return color.Style.strike;
+    return null;
 }
 
 fn parseRgbTag(tag: []const u8) !color.Rgb {
@@ -129,7 +99,6 @@ fn parseRgbTag(tag: []const u8) !color.Rgb {
 pub const Config = struct {
     format: []const u8 = default_config,
     needed_fields: std.EnumSet(Placeholder) = .{},
-    color_support: color.ColorSupport = undefined,
 
     var config_buf: [2048]u8 = undefined;
     var arena: std.heap.ArenaAllocator = undefined;
@@ -139,39 +108,32 @@ pub const Config = struct {
         return arena.allocator();
     }
 
-    fn ensureConfigExists(home: []const u8, allocator: mem.Allocator) ![]const u8 {
-        logger.debug("Ensuring config exists in home directory: {s}", .{home});
+    fn getOrCreateConfigFile(allocator: mem.Allocator) ![]const u8 {
+        const home_dir = std.process.getEnvVarOwned(allocator, "HOME") catch {
+            logger.err("HOME environment variable not found", .{});
+            return ConfigError.HomeDirNotFound;
+        };
+        defer allocator.free(home_dir);
 
-        const config_dir = try fs.path.join(allocator, &.{ home, ".config", "lifetch" });
+        const config_dir = try fs.path.join(allocator, &.{ home_dir, ".config", "lifetch" });
         defer allocator.free(config_dir);
 
-        fs.makeDirAbsolute(config_dir) catch |err| switch (err) {
-            error.PathAlreadyExists => {
-                logger.debug("Config directory already exists", .{});
-            },
-            else => {
+        fs.makeDirAbsolute(config_dir) catch |err| {
+            if (err != error.PathAlreadyExists) {
                 logger.err("Failed to create config directory: {}", .{err});
                 return ConfigError.ConfigDirCreationFailed;
-            },
+            }
         };
 
         const config_path = try fs.path.join(allocator, &.{ config_dir, "config" });
 
         if (fs.openFileAbsolute(config_path, .{ .mode = .read_only })) |file| {
-            logger.debug("Found existing config file", .{});
             file.close();
-        } else |err| {
-            logger.info("Config file not found, creating default: {}", .{err});
-            const file = fs.createFileAbsolute(config_path, .{}) catch |create_err| {
-                logger.err("Failed to create config file: {}", .{create_err});
-                return ConfigError.ConfigFileCreationFailed;
-            };
+        } else |_| {
+            logger.info("Creating default config file", .{});
+            const file = try fs.createFileAbsolute(config_path, .{});
             defer file.close();
-
-            file.writeAll(default_config) catch |write_err| {
-                logger.err("Failed to write default config: {}", .{write_err});
-                return ConfigError.ConfigFileCreationFailed;
-            };
+            try file.writeAll(default_config);
         }
 
         return config_path;
@@ -202,7 +164,7 @@ pub const Config = struct {
                         logger.err("Invalid RGB format: {s}", .{tag});
                         return ConfigError.InvalidColorFormat;
                     };
-                } else if (parseColorTag(tag) == null and parseStyleTag(tag) == null) {
+                } else if (getColorForTag(tag) == null and getStyleForTag(tag) == null) {
                     var valid = false;
                     inline for (std.meta.fields(Placeholder)) |field| {
                         const ph = @field(Placeholder, field.name);
@@ -241,25 +203,9 @@ pub const Config = struct {
         arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
         errdefer arena.deinit();
 
-        var self = Config{
-            .color_support = color.getColorSupport(),
-        };
+        var self = Config{};
 
-        const env = os.environ;
-        var home_dir: []const u8 = "";
-        for (env) |entry| {
-            const entry_str = mem.span(entry);
-            if (mem.startsWith(u8, entry_str, "HOME=")) {
-                home_dir = entry_str["HOME=".len..];
-                break;
-            }
-        }
-        if (home_dir.len == 0) {
-            logger.err("HOME environment variable not found", .{});
-            return ConfigError.HomeDirNotFound;
-        }
-
-        const config_path = try ensureConfigExists(home_dir, arena.allocator());
+        const config_path = try getOrCreateConfigFile(arena.allocator());
         defer arena.allocator().free(config_path);
 
         const file = fs.openFileAbsolute(config_path, .{ .mode = .read_only }) catch {
@@ -273,11 +219,12 @@ pub const Config = struct {
             return ConfigError.ConfigFileReadFailed;
         };
 
-        var lines = mem.splitScalar(u8, config_buf[0..bytes_read], '\n');
         var format_lines = std.ArrayList(u8).init(arena.allocator());
         defer format_lines.deinit();
 
+        var lines = mem.splitScalar(u8, config_buf[0..bytes_read], '\n');
         var found_format = false;
+
         while (lines.next()) |line| {
             const trimmed = mem.trim(u8, line, &std.ascii.whitespace);
             if (trimmed.len == 0 or trimmed[0] == '#') continue;
@@ -316,6 +263,8 @@ pub const Config = struct {
     }
 
     pub fn formatText(self: *const Config, text: []const u8, writer: anytype) !void {
-        try self.color_support.formatText(text, writer);
+        _ = self;
+        const color_support = @import("fetch/terminal.zig").getColorSupport();
+        try color_support.formatText(text, writer);
     }
 };

@@ -2,6 +2,7 @@ const std = @import("std");
 const fs = std.fs;
 const mem = std.mem;
 const os = std.os;
+
 const log = @import("../log.zig");
 const utils = @import("../utils.zig");
 
@@ -66,9 +67,13 @@ pub const User = struct {
     }
 
     pub fn formatComponent(self: User, allocator: std.mem.Allocator, input: []const u8) ![]const u8 {
-        var result = try utils.replaceAlloc(allocator, input, "{user}", self.username);
-        result = try utils.replaceAlloc(allocator, result, "{shell}", self.shell);
-        return result;
+        var ctx = utils.FormatContext.init(allocator);
+        defer ctx.deinit();
+
+        try ctx.add("user", self.username);
+        try ctx.add("shell", self.shell);
+
+        return ctx.format(input);
     }
 };
 

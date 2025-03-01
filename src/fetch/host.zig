@@ -1,6 +1,7 @@
 const std = @import("std");
 const fs = std.fs;
 const mem = std.mem;
+
 const log = @import("../log.zig");
 const utils = @import("../utils.zig");
 
@@ -49,7 +50,7 @@ pub const Host = struct {
     }
 
     pub fn formatComponent(self: Host, allocator: std.mem.Allocator, input: []const u8) ![]const u8 {
-        return utils.replaceAlloc(allocator, input, "{host}", self.hostname);
+        return utils.formatReplace(allocator, input, "host", self.hostname);
     }
 };
 

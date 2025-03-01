@@ -1,2 +1,13 @@
 .zig-cache/*
 zig-out/*
+
+# PKGBUILD
+*.tar.gz
+*.pkg.tar.zst
+*.pkg.tar.xz
+*.pkg.tar.bz2
+*.pkg.tar
+*.pkg.tar.gz
+*.pkg.tar.bz2
+*.pkg.tar.xz
+*.pkg.tar.zst

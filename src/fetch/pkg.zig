@@ -1,6 +1,7 @@
 const std = @import("std");
 const fs = std.fs;
 const mem = std.mem;
+
 const log = @import("../log.zig");
 const utils = @import("../utils.zig");
 
@@ -55,7 +56,9 @@ pub const PackageManager = struct {
 
         while (try it.next()) |entry| {
             if (entry.kind != .directory) continue;
-            if (mem.eql(u8, entry.name, ".") or mem.eql(u8, entry.name, "..")) continue;
+
+            if (entry.name.len > 0 and entry.name[0] == '.') continue;
+
             count += 1;
         }
 
@@ -69,6 +72,6 @@ pub const PackageManager = struct {
     pub fn formatComponent(self: PackageManager, allocator: std.mem.Allocator, input: []const u8) ![]const u8 {
         var buf: [16]u8 = undefined;
         const count_str = try std.fmt.bufPrint(&buf, "{d}", .{self.pkg_count});
-        return utils.replaceAlloc(allocator, input, "{pkgs}", count_str);
+        return utils.formatReplace(allocator, input, "pkgs", count_str);
     }
 };

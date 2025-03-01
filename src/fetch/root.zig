@@ -1,16 +1,17 @@
 const std = @import("std");
 
 pub const config = @import("../config.zig");
-pub const host = @import("host.zig");
-pub const user = @import("user.zig");
-pub const pkg = @import("pkg.zig");
+pub const debug = @import("../debug.zig");
 pub const distro = @import("distro.zig");
+pub const host = @import("host.zig");
+pub const log = @import("../log.zig");
+pub const pkg = @import("pkg.zig");
 pub const session = @import("session.zig");
 pub const terminal = @import("terminal.zig");
 pub const uptime = @import("uptime.zig");
-pub const wm = @import("wm.zig");
+pub const user = @import("user.zig");
 pub const utils = @import("../utils.zig");
-pub const log = @import("../log.zig");
+pub const wm = @import("wm.zig");
 
 pub const FetchError = error{
     InitializationFailed,
@@ -28,48 +29,91 @@ pub const FetchError = error{
 pub const Fetch = struct {
     allocator: std.mem.Allocator,
     config: config.Config,
-    host_info: host.Host,
-    user_info: user.User,
-    pkg_info: pkg.PackageManager,
-    distro_info: distro.Distro,
-    session_info: session.Session,
-    terminal_info: terminal.Terminal,
-    uptime_info: uptime.Uptime,
-    wm_info: wm.WindowManager,
+    host_info: ?host.Host = null,
+    user_info: ?user.User = null,
+    pkg_info: ?pkg.PackageManager = null,
+    distro_info: ?distro.Distro = null,
+    session_info: ?session.Session = null,
+    terminal_info: ?terminal.Terminal = null,
+    uptime_info: ?uptime.Uptime = null,
+    wm_info: ?wm.WindowManager = null,
     logger: log.ScopedLogger,
 
     pub fn init(allocator: std.mem.Allocator) FetchError!Fetch {
         var logger = log.ScopedLogger.init("fetch");
         logger.setLevel(.debug);
 
-        var cfg = try config.Config.init();
+        var cfg = config.Config.init() catch |err| {
+            return switch (err) {
+                error.HomeDirNotFound => FetchError.ConfigInitFailed,
+                error.ConfigDirCreationFailed => FetchError.ConfigInitFailed,
+                error.ConfigFileCreationFailed => FetchError.ConfigInitFailed,
+                error.ConfigFileReadFailed => FetchError.ConfigInitFailed,
+                error.ConfigParseError => FetchError.ConfigInitFailed,
+                error.InvalidColorFormat => FetchError.ConfigInitFailed,
+                error.InvalidStyleFormat => FetchError.ConfigInitFailed,
+                error.OutOfMemory => FetchError.InitializationFailed,
+                else => FetchError.ConfigInitFailed,
+            };
+        };
         errdefer cfg.deinit();
 
-        return Fetch{
+        var fetch = Fetch{
             .allocator = allocator,
             .config = cfg,
             .logger = logger,
-            .host_info = try host.Host.init(allocator),
-            .user_info = try user.User.init(allocator),
-            .pkg_info = try pkg.PackageManager.init(allocator),
-            .distro_info = try distro.Distro.init(allocator),
-            .session_info = try session.Session.init(allocator),
-            .terminal_info = try terminal.Terminal.init(allocator),
-            .uptime_info = try uptime.Uptime.init(allocator),
-            .wm_info = try wm.WindowManager.init(allocator),
         };
+
+        if (cfg.needsField(.host)) {
+            fetch.host_info = try host.Host.init(allocator);
+        }
+
+        if (cfg.needsField(.user)) {
+            fetch.user_info = try user.User.init(allocator);
+        }
+
+        if (cfg.needsField(.pkgs)) {
+            fetch.pkg_info = try pkg.PackageManager.init(allocator);
+        }
+
+        if (cfg.needsField(.distro) or cfg.needsField(.distro_pretty)) {
+            fetch.distro_info = try distro.Distro.init(allocator);
+        }
+
+        if (cfg.needsField(.session)) {
+            fetch.session_info = try session.Session.init(allocator);
+        }
+
+        if (cfg.needsField(.term)) {
+            fetch.terminal_info = try terminal.Terminal.init(allocator);
+        }
+
+        if (cfg.needsField(.uptime)) {
+            fetch.uptime_info = try uptime.Uptime.init(allocator);
+        }
+
+        if (cfg.needsField(.wm)) {
+            fetch.wm_info = try wm.WindowManager.init(allocator);
+        }
+
+        if (@import("builtin").mode == .Debug) {
+            debug.dumpStruct("Fetch information", fetch);
+        }
+
+        return fetch;
     }
 
     pub fn deinit(self: *Fetch) void {
         self.config.deinit();
-        self.host_info.deinit();
-        self.user_info.deinit();
-        self.pkg_info.deinit();
-        self.distro_info.deinit();
-        self.session_info.deinit();
-        self.terminal_info.deinit();
-        self.uptime_info.deinit();
-        self.wm_info.deinit();
+
+        if (self.host_info) |*h| h.deinit();
+        if (self.user_info) |*u| u.deinit();
+        if (self.pkg_info) |*p| p.deinit();
+        if (self.distro_info) |*d| d.deinit();
+        if (self.session_info) |*s| s.deinit();
+        if (self.terminal_info) |*t| t.deinit();
+        if (self.uptime_info) |*u| u.deinit();
+        if (self.wm_info) |*w| w.deinit();
     }
 
     pub fn format(
@@ -81,18 +125,68 @@ pub const Fetch = struct {
         _ = fmt;
         _ = options;
 
-        var result = self.config.format;
+        var count: usize = 0;
+        if (self.host_info != null) count += 1;
+        if (self.user_info != null) count += 2;
+        if (self.pkg_info != null) count += 1;
+        if (self.distro_info != null) count += 3;
+        if (self.session_info != null) count += 2;
+        if (self.uptime_info != null) count += 1;
+        if (self.wm_info != null) count += 1;
+        if (self.terminal_info != null) count += 1;
 
-        result = try self.host_info.formatComponent(self.allocator, result);
-        result = try self.user_info.formatComponent(self.allocator, result);
-        result = try self.pkg_info.formatComponent(self.allocator, result);
-        result = try self.distro_info.formatComponent(self.allocator, result);
-        result = try self.session_info.formatComponent(self.allocator, result);
-        result = try self.terminal_info.formatComponent(self.allocator, result);
-        result = try self.uptime_info.formatComponent(self.allocator, result);
-        result = try self.wm_info.formatComponent(self.allocator, result);
+        var pkg_count_buf: [16]u8 = undefined;
+        var pkg_count_fmt: []const u8 = "";
 
-        try self.config.formatText(result, writer);
+        var ctx = utils.FormatContext.init(self.allocator);
+        defer ctx.deinit();
+
+        if (self.host_info) |h| {
+            try ctx.add("host", h.hostname);
+        }
+
+        if (self.user_info) |u| {
+            try ctx.add("user", u.username);
+            try ctx.add("shell", u.shell);
+        }
+
+        if (self.pkg_info) |p| {
+            pkg_count_fmt = std.fmt.bufPrint(&pkg_count_buf, "{d}", .{p.pkg_count}) catch "0";
+            try ctx.add("pkgs", pkg_count_fmt);
+        }
+
+        if (self.distro_info) |d| {
+            try ctx.add("distro", d.id);
+            try ctx.add("distro_version", d.version);
+            try ctx.add("distro_pretty", d.name);
+        }
+
+        if (self.session_info) |s| {
+            try ctx.add("de", s.desktop);
+            try ctx.add("session", s.display_server);
+        }
+
+        if (self.uptime_info) |u| {
+            try ctx.add("uptime", u.formatted);
+        }
+
+        if (self.wm_info) |w| {
+            try ctx.add("wm", w.name);
+        }
+
+        if (self.terminal_info) |t| {
+            try ctx.add("term", t.name);
+        }
+
+        const formatted = try ctx.format(self.config.format);
+        defer self.allocator.free(formatted);
+
+        if (self.terminal_info) |t| {
+            try t.formatText(formatted, writer);
+        } else {
+            try self.config.formatText(formatted, writer);
+        }
+
         try writer.writeByte('\n');
     }
 };

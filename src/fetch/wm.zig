@@ -1,6 +1,7 @@
 const std = @import("std");
 const fs = std.fs;
 const mem = std.mem;
+
 const log = @import("../log.zig");
 const utils = @import("../utils.zig");
 
@@ -90,6 +91,6 @@ pub const WindowManager = struct {
     }
 
     pub fn formatComponent(self: WindowManager, allocator: std.mem.Allocator, input: []const u8) ![]const u8 {
-        return utils.replaceAlloc(allocator, input, "{wm}", self.name);
+        return utils.formatReplace(allocator, input, "wm", self.name);
     }
 };
