@@ -15,16 +15,27 @@ Benchmark 1: zig-out/bin/lifetch
 
 more to come!
 
+## config
+
+generated inside your home directory at
+`~/.config/lifetch/config.ini`
+
+default config can also be found [here](config.ini)
+
+## installing from package managers
+
+AUR:
+```bash
+paru -S lifetch-git
+```
+
+## building from src
+
 ## prerequisites
 
 - [zig master](https://ziglang.org/)
 
 i recommend installing `zig-nightly-bin` from the aur if you are on archlinux.
-
-## config
-
-generated inside your home directory at
-`~/.config/lifetch/config.ini`
 
 ## building
 
