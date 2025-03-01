@@ -10,17 +10,6 @@ var logger = log.ScopedLogger.init("lifetch/main");
 
 var debug_allocator: std.heap.DebugAllocator(.{}) = .init;
 
-fn runFetch(writer: anytype, allocator: std.mem.Allocator) !void {
-    if (builtin.mode == .Debug) {
-        logger.warn("RUNNING IN DEBUG MODE", .{});
-    }
-
-    var fetch_info = try fetch.Fetch.init(allocator);
-    defer fetch_info.deinit();
-
-    try writer.print("{s}", .{fetch_info});
-}
-
 pub fn main() !void {
     const allocator, const is_debug = gpa: {
         if (@import("builtin").os.tag == .wasi) break :gpa .{ std.heap.wasm_allocator, false };
