@@ -151,8 +151,8 @@ pub const FormatContext = struct {
     }
 
     pub fn format(self: *const FormatContext, template: []const u8) ![]const u8 {
-        var tokens = std.ArrayList(Token).init(self.allocator);
-        defer tokens.deinit();
+        var tokens: std.ArrayList(Token) = .empty;
+        defer tokens.deinit(self.allocator);
 
         var size_diff: isize = 0;
         var pos: usize = 0;
@@ -167,7 +167,7 @@ pub const FormatContext = struct {
                 const key = template[pos + 1 .. end_pos];
 
                 if (self.replacements.get(key)) |replacement| {
-                    try tokens.append(Token{
+                    try tokens.append(self.allocator, Token{
                         .start = pos,
                         .end = end_pos + 1,
                         .key = key,

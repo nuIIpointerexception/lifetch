@@ -58,21 +58,21 @@ pub const ScopedLogger = struct {
     pub fn log(self: *Self, level: LogLevel, comptime fmt: []const u8, args: anytype) void {
         if (!self.shouldLog(level)) return;
 
-        const stderr = std.io.getStdErr().writer();
         self.mutex.lock();
         defer self.mutex.unlock();
 
-        stderr.print("{s}[{s}][{s}]{s} ", .{
+        // Use std.debug.print for logging to stderr (simple and reliable)
+        std.debug.print("{s}[{s}][{s}]{s} ", .{
             level.color(),
             level.prefix(),
             self.scope,
             "\x1b[0m",
-        }) catch return;
+        });
 
         if (std.fmt.bufPrint(self.buffer[0..], fmt, args)) |msg| {
-            stderr.print("{s}\n", .{msg}) catch return;
+            std.debug.print("{s}\n", .{msg});
         } else |_| {
-            stderr.print(fmt ++ "\n", args) catch return;
+            std.debug.print(fmt ++ "\n", args);
         }
     }
 

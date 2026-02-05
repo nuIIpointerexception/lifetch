@@ -12,8 +12,7 @@ Benchmark 1: zig-out/bin/lifetch
 ## tested on
 
 - archlinux
-
-more to come!
+- voidlinux
 
 ## config
 
@@ -33,9 +32,8 @@ paru -S lifetch-git
 
 ## prerequisites
 
-- [zig master](https://ziglang.org/)
+- [zig master](https://ziglang.org/) or later
 
-i recommend installing `zig-nightly-bin` from the aur if you are on archlinux.
 
 ## building
 

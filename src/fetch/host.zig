@@ -1,5 +1,5 @@
 const std = @import("std");
-const fs = std.fs;
+const Io = std.Io;
 const mem = std.mem;
 
 const log = @import("../log.zig");
@@ -17,22 +17,21 @@ pub const Host = struct {
     allocator: std.mem.Allocator,
     logger: log.ScopedLogger,
 
-    pub fn init(allocator: std.mem.Allocator) HostError!Host {
+    pub fn init(allocator: std.mem.Allocator, io: Io) HostError!Host {
         var logger = log.ScopedLogger.init("host");
         var hostname_buf: [max_hostname_len]u8 = undefined;
 
-        const hostname_file = fs.cwd().openFile("/etc/hostname", .{ .mode = .read_only }) catch |err| {
+        const hostname_file = Io.Dir.openFileAbsolute(io, "/etc/hostname", .{}) catch |err| {
             logger.err("Failed to read hostname: {}", .{err});
             return HostError.HostnameReadFailed;
         };
-        defer hostname_file.close();
 
-        const hostname_len = hostname_file.readAll(&hostname_buf) catch |err| {
+        const hostname_len = Io.File.readPositionalAll(hostname_file, io, &hostname_buf, 0) catch |err| {
             logger.err("Failed to read hostname content: {}", .{err});
             return HostError.HostnameReadFailed;
         };
 
-        const trimmed_hostname = mem.trimRight(u8, hostname_buf[0..hostname_len], "\n");
+        const trimmed_hostname = mem.trimEnd(u8, hostname_buf[0..hostname_len], "\n");
         const duped_hostname = allocator.dupe(u8, trimmed_hostname) catch |err| {
             logger.err("Failed to allocate hostname: {}", .{err});
             return HostError.HostnameReadFailed;

@@ -1,7 +1,6 @@
 const std = @import("std");
-const fs = std.fs;
+const process = std.process;
 const mem = std.mem;
-const os = std.os;
 
 const log = @import("../log.zig");
 const utils = @import("../utils.zig");
@@ -11,7 +10,6 @@ pub const max_shell_len = 64;
 
 pub const UserError = error{
     UserInfoFailed,
-    EnvironReadFailed,
     BufferTooSmall,
 } || std.mem.Allocator.Error;
 
@@ -21,33 +19,17 @@ pub const User = struct {
     allocator: std.mem.Allocator,
     logger: log.ScopedLogger,
 
-    const shell_prefix = "SHELL=";
-    const user_prefix = "USER=";
+    pub fn init(allocator: std.mem.Allocator, environ: process.Environ) UserError!User {
+        const logger = log.ScopedLogger.init("user");
 
-    pub fn init(allocator: std.mem.Allocator) UserError!User {
-        var logger = log.ScopedLogger.init("user");
-
-        const environ_file = fs.cwd().openFile("/proc/self/environ", .{ .mode = .read_only }) catch |err| {
-            logger.err("Failed to open environ: {}", .{err});
-            return UserError.EnvironReadFailed;
-        };
-        defer environ_file.close();
-
-        var environ_buf: [2048]u8 = undefined;
-        const bytes_read = environ_file.readAll(&environ_buf) catch |err| {
-            logger.err("Failed to read environ: {}", .{err});
-            return UserError.EnvironReadFailed;
-        };
-        const environ_content = environ_buf[0..bytes_read];
-
-        const username = if (utils.getEnvValue(environ_content, user_prefix)) |name|
+        const username = if (process.Environ.getPosix(environ, "USER")) |name|
             try allocator.dupe(u8, name)
         else
             try allocator.dupe(u8, "unknown");
 
         var shell_buf: [max_shell_len]u8 = undefined;
-        const shell = if (utils.getEnvValue(environ_content, shell_prefix)) |sh| blk: {
-            const shell_name = fs.path.basename(sh);
+        const shell = if (process.Environ.getPosix(environ, "SHELL")) |sh| blk: {
+            const shell_name = std.fs.path.basename(sh);
             if (shell_name.len >= shell_buf.len) return UserError.BufferTooSmall;
             @memcpy(shell_buf[0..shell_name.len], shell_name);
             break :blk try allocator.dupe(u8, shell_buf[0..shell_name.len]);

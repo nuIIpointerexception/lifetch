@@ -1,4 +1,6 @@
 const std = @import("std");
+const process = std.process;
+const Io = std.Io;
 
 pub const config = @import("../config.zig");
 pub const debug = @import("../debug.zig");
@@ -29,6 +31,7 @@ pub const FetchError = error{
 pub const Fetch = struct {
     allocator: std.mem.Allocator,
     config: config.Config,
+    color_support: terminal.ColorSupport,
     host_info: ?host.Host = null,
     user_info: ?user.User = null,
     pkg_info: ?pkg.PackageManager = null,
@@ -39,21 +42,21 @@ pub const Fetch = struct {
     wm_info: ?wm.WindowManager = null,
     logger: log.ScopedLogger,
 
-    pub fn init(allocator: std.mem.Allocator) FetchError!Fetch {
+    pub fn init(allocator: std.mem.Allocator, io: Io, environ: process.Environ) FetchError!Fetch {
         var logger = log.ScopedLogger.init("fetch");
         logger.setLevel(.debug);
 
-        var cfg = config.Config.init() catch |err| {
+        var cfg = config.Config.init(io, environ) catch |err| {
             return switch (err) {
-                error.HomeDirNotFound => FetchError.ConfigInitFailed,
-                error.ConfigDirCreationFailed => FetchError.ConfigInitFailed,
-                error.ConfigFileCreationFailed => FetchError.ConfigInitFailed,
-                error.ConfigFileReadFailed => FetchError.ConfigInitFailed,
-                error.ConfigParseError => FetchError.ConfigInitFailed,
-                error.InvalidColorFormat => FetchError.ConfigInitFailed,
-                error.InvalidStyleFormat => FetchError.ConfigInitFailed,
+                error.HomeDirNotFound,
+                error.ConfigDirCreationFailed,
+                error.ConfigFileCreationFailed,
+                error.ConfigFileReadFailed,
+                error.ConfigParseError,
+                error.InvalidColorFormat,
+                error.InvalidStyleFormat,
+                => FetchError.ConfigInitFailed,
                 error.OutOfMemory => FetchError.InitializationFailed,
-                else => FetchError.ConfigInitFailed,
             };
         };
         errdefer cfg.deinit();
@@ -61,39 +64,40 @@ pub const Fetch = struct {
         var fetch = Fetch{
             .allocator = allocator,
             .config = cfg,
+            .color_support = terminal.ColorSupport.init(io, environ),
             .logger = logger,
         };
 
         if (cfg.needsField(.host)) {
-            fetch.host_info = try host.Host.init(allocator);
+            fetch.host_info = try host.Host.init(allocator, io);
         }
 
         if (cfg.needsField(.user)) {
-            fetch.user_info = try user.User.init(allocator);
+            fetch.user_info = try user.User.init(allocator, environ);
         }
 
         if (cfg.needsField(.pkgs)) {
-            fetch.pkg_info = try pkg.PackageManager.init(allocator);
+            fetch.pkg_info = try pkg.PackageManager.init(allocator, io);
         }
 
         if (cfg.needsField(.distro) or cfg.needsField(.distro_pretty)) {
-            fetch.distro_info = try distro.Distro.init(allocator);
+            fetch.distro_info = try distro.Distro.init(allocator, io);
         }
 
         if (cfg.needsField(.session)) {
-            fetch.session_info = try session.Session.init(allocator);
+            fetch.session_info = try session.Session.init(allocator, environ);
         }
 
         if (cfg.needsField(.term)) {
-            fetch.terminal_info = try terminal.Terminal.init(allocator);
+            fetch.terminal_info = try terminal.Terminal.init(allocator, io, environ);
         }
 
         if (cfg.needsField(.uptime)) {
-            fetch.uptime_info = try uptime.Uptime.init(allocator);
+            fetch.uptime_info = try uptime.Uptime.init(allocator, io);
         }
 
         if (cfg.needsField(.wm)) {
-            fetch.wm_info = try wm.WindowManager.init(allocator);
+            fetch.wm_info = try wm.WindowManager.init(allocator, environ);
         }
 
         if (@import("builtin").mode == .Debug) {
@@ -117,75 +121,73 @@ pub const Fetch = struct {
     }
 
     pub fn format(
-        self: Fetch,
-        comptime fmt: []const u8,
-        options: std.fmt.FormatOptions,
-        writer: anytype,
-    ) !void {
-        _ = fmt;
-        _ = options;
-
-        var count: usize = 0;
-        if (self.host_info != null) count += 1;
-        if (self.user_info != null) count += 2;
-        if (self.pkg_info != null) count += 1;
-        if (self.distro_info != null) count += 3;
-        if (self.session_info != null) count += 2;
-        if (self.uptime_info != null) count += 1;
-        if (self.wm_info != null) count += 1;
-        if (self.terminal_info != null) count += 1;
-
+        self: *const Fetch,
+        writer: *Io.Writer,
+    ) Io.Writer.Error!void {
         var pkg_count_buf: [16]u8 = undefined;
-        var pkg_count_fmt: []const u8 = "";
-
         var ctx = utils.FormatContext.init(self.allocator);
         defer ctx.deinit();
 
+        const add_or_oom = struct {
+            fn call(
+                context: *utils.FormatContext,
+                w: *Io.Writer,
+                key: []const u8,
+                value: []const u8,
+            ) Io.Writer.Error!bool {
+                context.add(key, value) catch {
+                    try w.writeAll("[format error: out of memory]\n");
+                    return true;
+                };
+                return false;
+            }
+        }.call;
+
         if (self.host_info) |h| {
-            try ctx.add("host", h.hostname);
+            if (try add_or_oom(&ctx, writer, "host", h.hostname)) return;
         }
 
         if (self.user_info) |u| {
-            try ctx.add("user", u.username);
-            try ctx.add("shell", u.shell);
+            if (try add_or_oom(&ctx, writer, "user", u.username)) return;
+            if (try add_or_oom(&ctx, writer, "shell", u.shell)) return;
         }
 
         if (self.pkg_info) |p| {
-            pkg_count_fmt = std.fmt.bufPrint(&pkg_count_buf, "{d}", .{p.pkg_count}) catch "0";
-            try ctx.add("pkgs", pkg_count_fmt);
+            const pkg_count_fmt = std.fmt.bufPrint(&pkg_count_buf, "{d}", .{p.pkg_count}) catch "0";
+            if (try add_or_oom(&ctx, writer, "pkgs", pkg_count_fmt)) return;
         }
 
         if (self.distro_info) |d| {
-            try ctx.add("distro", d.id);
-            try ctx.add("distro_version", d.version);
-            try ctx.add("distro_pretty", d.name);
+            if (try add_or_oom(&ctx, writer, "distro", d.id)) return;
+            if (try add_or_oom(&ctx, writer, "distro_version", d.version)) return;
+            if (try add_or_oom(&ctx, writer, "distro_pretty", d.name)) return;
         }
 
         if (self.session_info) |s| {
-            try ctx.add("de", s.desktop);
-            try ctx.add("session", s.display_server);
+            if (try add_or_oom(&ctx, writer, "de", s.desktop)) return;
+            if (try add_or_oom(&ctx, writer, "session", s.display_server)) return;
         }
 
         if (self.uptime_info) |u| {
-            try ctx.add("uptime", u.formatted);
+            if (try add_or_oom(&ctx, writer, "uptime", u.formatted)) return;
         }
 
         if (self.wm_info) |w| {
-            try ctx.add("wm", w.name);
+            if (try add_or_oom(&ctx, writer, "wm", w.name)) return;
         }
 
         if (self.terminal_info) |t| {
-            try ctx.add("term", t.name);
+            if (try add_or_oom(&ctx, writer, "term", t.name)) return;
         }
 
-        const formatted = try ctx.format(self.config.format);
+        const formatted = ctx.format(self.config.format) catch {
+            return try writer.writeAll("[format error: out of memory]\n");
+        };
         defer self.allocator.free(formatted);
 
-        if (self.terminal_info) |t| {
-            try t.formatText(formatted, writer);
-        } else {
-            try self.config.formatText(formatted, writer);
-        }
+        self.color_support.formatText(formatted, writer) catch {
+            return try writer.writeAll("[format error]\n");
+        };
 
         try writer.writeByte('\n');
     }

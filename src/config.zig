@@ -1,7 +1,8 @@
 const std = @import("std");
 const fs = std.fs;
 const mem = std.mem;
-const os = std.os;
+const process = std.process;
+const Io = std.Io;
 
 const color = @import("color.zig");
 const log = @import("log.zig");
@@ -108,33 +109,45 @@ pub const Config = struct {
         return arena.allocator();
     }
 
-    fn getOrCreateConfigFile(allocator: mem.Allocator) ![]const u8 {
-        const home_dir = std.process.getEnvVarOwned(allocator, "HOME") catch {
+    fn getOrCreateConfigFile(allocator: mem.Allocator, io: Io, environ: process.Environ) ![]const u8 {
+        const home_dir = process.Environ.getPosix(environ, "HOME") orelse {
             logger.err("HOME environment variable not found", .{});
             return ConfigError.HomeDirNotFound;
         };
-        defer allocator.free(home_dir);
 
-        const config_dir = try fs.path.join(allocator, &.{ home_dir, ".config", "lifetch" });
+        const config_dir = try Io.Dir.path.join(allocator, &.{ home_dir, ".config", "lifetch" });
         defer allocator.free(config_dir);
 
-        fs.makeDirAbsolute(config_dir) catch |err| {
+        // Create config directory if it doesn't exist (createDirAbsolute handles existing dirs)
+        Io.Dir.createDirAbsolute(io, config_dir, .default_dir) catch |err| {
             if (err != error.PathAlreadyExists) {
                 logger.err("Failed to create config directory: {}", .{err});
                 return ConfigError.ConfigDirCreationFailed;
             }
         };
 
-        const config_path = try fs.path.join(allocator, &.{ config_dir, "config" });
+        const config_path = try Io.Dir.path.join(allocator, &.{ config_dir, "config" });
 
-        if (fs.openFileAbsolute(config_path, .{ .mode = .read_only })) |file| {
-            file.close();
-        } else |_| {
-            logger.info("Creating default config file", .{});
-            const file = try fs.createFileAbsolute(config_path, .{});
-            defer file.close();
-            try file.writeAll(default_config);
-        }
+        // Check if config file exists, create if not
+        _ = Io.Dir.openFileAbsolute(io, config_path, .{}) catch |err| {
+            if (err == error.FileNotFound) {
+                logger.info("Creating default config file", .{});
+                const new_file = Io.Dir.createFileAbsolute(io, config_path, .{ .truncate = false }) catch {
+                    return ConfigError.ConfigFileCreationFailed;
+                };
+                var write_buf: [4096]u8 = undefined;
+                var writer = Io.File.Writer.initStreaming(new_file, io, &write_buf);
+                _ = writer.interface.write(default_config) catch {
+                    return ConfigError.ConfigFileCreationFailed;
+                };
+                writer.interface.flush() catch {
+                    return ConfigError.ConfigFileCreationFailed;
+                };
+            } else {
+                return ConfigError.ConfigFileReadFailed;
+            }
+            return config_path;
+        };
 
         return config_path;
     }
@@ -196,7 +209,7 @@ pub const Config = struct {
         return fields;
     }
 
-    pub fn init() !Config {
+    pub fn init(io: Io, environ: process.Environ) !Config {
         logger = log.ScopedLogger.init("config");
         logger.info("Initializing config", .{});
 
@@ -205,22 +218,22 @@ pub const Config = struct {
 
         var self = Config{};
 
-        const config_path = try getOrCreateConfigFile(arena.allocator());
+        const config_path = try getOrCreateConfigFile(arena.allocator(), io, environ);
         defer arena.allocator().free(config_path);
 
-        const file = fs.openFileAbsolute(config_path, .{ .mode = .read_only }) catch {
+        const file = Io.Dir.openFileAbsolute(io, config_path, .{}) catch {
             logger.err("Failed to open config file: {s}", .{config_path});
             return ConfigError.ConfigFileReadFailed;
         };
-        defer file.close();
+        defer file.close(io);
 
-        const bytes_read = file.readAll(&config_buf) catch {
+        const bytes_read = Io.File.readPositionalAll(file, io, &config_buf, 0) catch {
             logger.err("Failed to read config file", .{});
             return ConfigError.ConfigFileReadFailed;
         };
 
-        var format_lines = std.ArrayList(u8).init(arena.allocator());
-        defer format_lines.deinit();
+        var format_lines: std.ArrayList(u8) = .empty;
+        defer format_lines.deinit(arena.allocator());
 
         var lines = mem.splitScalar(u8, config_buf[0..bytes_read], '\n');
         var found_format = false;
@@ -232,11 +245,11 @@ pub const Config = struct {
             if (!found_format) {
                 if (mem.startsWith(u8, trimmed, "format = ")) {
                     found_format = true;
-                    try format_lines.appendSlice(trimmed["format = ".len..]);
+                    try format_lines.appendSlice(arena.allocator(), trimmed["format = ".len..]);
                 }
             } else {
-                try format_lines.append('\n');
-                try format_lines.appendSlice(trimmed);
+                try format_lines.append(arena.allocator(), '\n');
+                try format_lines.appendSlice(arena.allocator(), trimmed);
             }
         }
 
@@ -262,9 +275,4 @@ pub const Config = struct {
         return self.needed_fields.contains(field);
     }
 
-    pub fn formatText(self: *const Config, text: []const u8, writer: anytype) !void {
-        _ = self;
-        const color_support = @import("fetch/terminal.zig").getColorSupport();
-        try color_support.formatText(text, writer);
-    }
 };

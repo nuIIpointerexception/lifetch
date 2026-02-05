@@ -1,8 +1,7 @@
 const std = @import("std");
-const fs = std.fs;
+const Io = std.Io;
+const process = std.process;
 const mem = std.mem;
-const os = std.os;
-const builtin = @import("builtin");
 
 const color = @import("../color.zig");
 const log = @import("../log.zig");
@@ -12,7 +11,6 @@ pub const max_term_len = 32;
 
 pub const TerminalError = error{
     TerminalDetectionFailed,
-    EnvironReadFailed,
     BufferTooSmall,
 } || std.mem.Allocator.Error;
 
@@ -21,26 +19,19 @@ pub const ColorSupport = struct {
     color256: bool = false,
     basic: bool = false,
 
-    const TermInfo = struct {
-        fn readTermInfo(term: []const u8) !bool {
-            if (term.len == 0) return false;
+    fn readTermInfo(io: Io, term: []const u8) !bool {
+        if (term.len == 0) return false;
 
-            var path_buf: [std.fs.max_path_bytes]u8 = undefined;
-            const path = std.fmt.bufPrint(&path_buf, "/usr/share/terminfo/{c}/{s}", .{ term[0], term[1..] }) catch return false;
+        var path_buf: [Io.Dir.max_path_bytes]u8 = undefined;
+        const path = std.fmt.bufPrint(&path_buf, "/usr/share/terminfo/{c}/{s}", .{ term[0], term }) catch return false;
 
-            const file = fs.openFileAbsolute(path, .{ .mode = .read_only }) catch |err| switch (err) {
-                error.FileNotFound => return false,
-                else => |e| return e,
-            };
-            defer file.close();
+        _ = Io.Dir.openFileAbsolute(io, path, .{}) catch |err| switch (err) {
+            error.FileNotFound => return false,
+            else => |e| return e,
+        };
 
-            var header_buf: [12]u8 = undefined;
-            if ((try file.readAll(&header_buf)) < 12) return false;
-            if (header_buf[0] != 0x1a and header_buf[1] != 0x01) return false;
-
-            return (@as(u16, @intCast(header_buf[10])) | (@as(u16, @intCast(header_buf[11])) << 8)) > 0;
-        }
-    };
+        return true;
+    }
 
     fn parseColorTag(tag: []const u8) ?color.Color {
         return color.ColorSupport.parseColorTag(tag);
@@ -54,44 +45,45 @@ pub const ColorSupport = struct {
         return color.ColorSupport.parseRgbTag(tag);
     }
 
-    pub fn init() ColorSupport {
+    pub fn init(io: Io, environ: process.Environ) ColorSupport {
         var self = ColorSupport{};
-        const env = os.environ;
 
-        for (env) |entry| {
-            const entry_str = std.mem.span(entry);
-            if (std.mem.startsWith(u8, entry_str, "NO_COLOR=")) return self;
-        }
-
-        for (env) |entry| {
-            const entry_str = std.mem.span(entry);
-            if (std.mem.startsWith(u8, entry_str, "COLORTERM=")) {
-                const value = entry_str["COLORTERM=".len..];
-                if (std.mem.eql(u8, value, "truecolor") or std.mem.eql(u8, value, "24bit")) {
-                    self.truecolor = true;
-                    self.basic = true;
-                }
-                break;
+        if (process.Environ.getPosix(environ, "NO_COLOR")) |value| {
+            if (value.len > 0) {
+                return self;
             }
         }
 
-        for (env) |entry| {
-            const entry_str = std.mem.span(entry);
-            if (std.mem.startsWith(u8, entry_str, "TERM=")) {
-                const term = entry_str["TERM=".len..];
-                if (TermInfo.readTermInfo(term)) |has_colors| {
-                    if (has_colors) {
-                        self.basic = true;
-                        self.color256 = std.mem.indexOf(u8, term, "256color") != null;
-                    }
-                } else |_| {
-                    self.color256 = std.mem.indexOf(u8, term, "256color") != null;
-                    if (self.color256) self.basic = true;
-                    if (!self.basic) {
-                        self.basic = std.mem.indexOf(u8, term, "color") != null or self.truecolor;
-                    }
+        if (process.Environ.getPosix(environ, "COLORTERM")) |value| {
+            if (std.mem.eql(u8, value, "truecolor") or std.mem.eql(u8, value, "24bit")) {
+                self.truecolor = true;
+                self.basic = true;
+            }
+        }
+
+        if (process.Environ.getPosix(environ, "TERM")) |term| {
+            const known_color_terms = [_][]const u8{
+                "linux", "xterm", "rxvt", "screen", "tmux", "vt100", "vt220",
+                "ansi", "cygwin", "putty", "konsole", "gnome", "alacritty",
+                "kitty", "foot", "wezterm", "st", "urxvt",
+            };
+
+            for (known_color_terms) |known| {
+                if (std.mem.startsWith(u8, term, known)) {
+                    self.basic = true;
+                    break;
                 }
-                break;
+            }
+
+            self.color256 = std.mem.indexOf(u8, term, "256color") != null;
+            if (self.color256) self.basic = true;
+
+            if (!self.basic) {
+                if (readTermInfo(io, term)) |has_colors| {
+                    self.basic = has_colors;
+                } else |_| {
+                    self.basic = std.mem.indexOf(u8, term, "color") != null or self.truecolor;
+                }
             }
         }
 
@@ -155,13 +147,76 @@ pub const ColorSupport = struct {
     }
 };
 
-var color_support: ?ColorSupport = null;
+const known_terminals = [_][]const u8{
+    "foot", "alacritty", "kitty", "wezterm", "konsole", "gnome-terminal",
+    "xfce4-terminal", "terminator", "tilix", "st", "urxvt", "rxvt",
+    "xterm", "mate-terminal", "lxterminal", "qterminal", "terminology",
+    "sakura", "guake", "tilda", "yakuake", "cool-retro-term",
+};
 
-pub fn getColorSupport() ColorSupport {
-    return color_support orelse {
-        color_support = ColorSupport.init();
-        return color_support.?;
-    };
+fn detectParentTerminal(io: Io) !?[]const u8 {
+    const stat_file = Io.Dir.openFileAbsolute(io, "/proc/self/stat", .{}) catch return null;
+    defer stat_file.close(io);
+    var stat_buf: [256]u8 = undefined;
+    const stat_len = Io.File.readPositionalAll(stat_file, io, &stat_buf, 0) catch return null;
+    const stat_content = stat_buf[0..stat_len];
+
+    const close_paren = mem.lastIndexOfScalar(u8, stat_content, ')') orelse return null;
+    const after_paren = stat_content[close_paren + 2 ..];
+    var iter = mem.splitScalar(u8, after_paren, ' ');
+    _ = iter.next();
+    const ppid_str = iter.next() orelse return null;
+
+    var comm_path_buf: [64]u8 = undefined;
+    const comm_path = std.fmt.bufPrint(&comm_path_buf, "/proc/{s}/comm", .{ppid_str}) catch return null;
+
+    const comm_file = Io.Dir.openFileAbsolute(io, comm_path, .{}) catch return null;
+    defer comm_file.close(io);
+    var comm_buf: [64]u8 = undefined;
+    const comm_len = Io.File.readPositionalAll(comm_file, io, &comm_buf, 0) catch return null;
+    const comm = mem.trimEnd(u8, comm_buf[0..comm_len], "\n");
+
+    for (known_terminals) |term| {
+        if (mem.eql(u8, comm, term)) {
+            return term;
+        }
+    }
+
+    if (mem.eql(u8, comm, "fish") or mem.eql(u8, comm, "bash") or
+        mem.eql(u8, comm, "zsh") or mem.eql(u8, comm, "sh"))
+    {
+        var gstat_path_buf: [64]u8 = undefined;
+        const gstat_path = std.fmt.bufPrint(&gstat_path_buf, "/proc/{s}/stat", .{ppid_str}) catch return null;
+
+        const gstat_file = Io.Dir.openFileAbsolute(io, gstat_path, .{}) catch return null;
+        defer gstat_file.close(io);
+        var gstat_buf: [256]u8 = undefined;
+        const gstat_len = Io.File.readPositionalAll(gstat_file, io, &gstat_buf, 0) catch return null;
+        const gstat_content = gstat_buf[0..gstat_len];
+
+        const gclose_paren = mem.lastIndexOfScalar(u8, gstat_content, ')') orelse return null;
+        const gafter_paren = gstat_content[gclose_paren + 2 ..];
+        var giter = mem.splitScalar(u8, gafter_paren, ' ');
+        _ = giter.next();
+        const gppid_str = giter.next() orelse return null;
+
+        var gcomm_path_buf: [64]u8 = undefined;
+        const gcomm_path = std.fmt.bufPrint(&gcomm_path_buf, "/proc/{s}/comm", .{gppid_str}) catch return null;
+
+        const gcomm_file = Io.Dir.openFileAbsolute(io, gcomm_path, .{}) catch return null;
+        defer gcomm_file.close(io);
+        var gcomm_buf: [64]u8 = undefined;
+        const gcomm_len = Io.File.readPositionalAll(gcomm_file, io, &gcomm_buf, 0) catch return null;
+        const gcomm = mem.trimEnd(u8, gcomm_buf[0..gcomm_len], "\n");
+
+        for (known_terminals) |term| {
+            if (mem.eql(u8, gcomm, term)) {
+                return term;
+            }
+        }
+    }
+
+    return null;
 }
 
 pub const Terminal = struct {
@@ -170,44 +225,13 @@ pub const Terminal = struct {
     allocator: std.mem.Allocator,
     logger: log.ScopedLogger,
 
-    const term_prefix = "TERM=";
-    const term_program_prefix = "TERM_PROGRAM=";
+    pub fn init(allocator: std.mem.Allocator, io: Io, environ: process.Environ) TerminalError!Terminal {
+        const logger = log.ScopedLogger.init("terminal");
 
-    pub fn init(allocator: std.mem.Allocator) TerminalError!Terminal {
-        var logger = log.ScopedLogger.init("terminal");
+        const term_name = process.Environ.getPosix(environ, "TERM");
+        const term_program = process.Environ.getPosix(environ, "TERM_PROGRAM");
 
-        const environ_file = fs.cwd().openFile("/proc/self/environ", .{ .mode = .read_only }) catch |err| {
-            logger.err("Failed to open environ: {}", .{err});
-            return TerminalError.EnvironReadFailed;
-        };
-        defer environ_file.close();
-
-        var environ_buf: [2048]u8 = undefined;
-        const bytes_read = environ_file.readAll(&environ_buf) catch |err| {
-            logger.err("Failed to read environ: {}", .{err});
-            return TerminalError.EnvironReadFailed;
-        };
-        const environ_content = environ_buf[0..bytes_read];
-
-        var term_name: ?[]const u8 = null;
-        var term_program: ?[]const u8 = null;
-
-        var i: usize = 0;
-        while (i < environ_content.len) {
-            const remaining = environ_content[i..];
-            if (std.mem.startsWith(u8, remaining, term_program_prefix)) {
-                const value_start = i + term_program_prefix.len;
-                const value_end = std.mem.indexOfScalar(u8, environ_content[value_start..], 0) orelse break;
-                term_program = environ_content[value_start..(value_start + value_end)];
-            } else if (std.mem.startsWith(u8, remaining, term_prefix)) {
-                const value_start = i + term_prefix.len;
-                const value_end = std.mem.indexOfScalar(u8, environ_content[value_start..], 0) orelse break;
-                term_name = environ_content[value_start..(value_start + value_end)];
-            }
-
-            i += std.mem.indexOfScalar(u8, environ_content[i..], 0) orelse break;
-            i += 1;
-        }
+        const parent_term = detectParentTerminal(io) catch null;
 
         const terminal_name = if (term_program) |name| blk: {
             const clean_name = if (mem.eql(u8, name, "WarpTerminal"))
@@ -215,6 +239,8 @@ pub const Terminal = struct {
             else
                 name;
             break :blk try allocator.dupe(u8, clean_name);
+        } else if (parent_term) |name| blk: {
+            break :blk try allocator.dupe(u8, name);
         } else if (term_name) |name| blk: {
             const clean_name = if (mem.startsWith(u8, name, "xterm"))
                 "xterm"
@@ -231,7 +257,7 @@ pub const Terminal = struct {
 
         return Terminal{
             .name = terminal_name,
-            .color_support = getColorSupport(),
+            .color_support = ColorSupport.init(io, environ),
             .allocator = allocator,
             .logger = logger,
         };

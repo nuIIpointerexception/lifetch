@@ -1,5 +1,6 @@
 const std = @import("std");
 const builtin = @import("builtin");
+const Io = std.Io;
 
 const fmt = @import("fmt.zig");
 const log = @import("log.zig");
@@ -18,8 +19,7 @@ pub fn isEnabled() bool {
 
 pub fn debugLog(comptime format: []const u8, args: anytype) void {
     if (!isEnabled()) return;
-    const stderr = std.io.getStdErr().writer();
-    stderr.print(format ++ "\n", args) catch {};
+    std.debug.print(format ++ "\n", args);
 }
 
 pub fn dumpStruct(name: []const u8, value: anytype) void {
@@ -39,8 +39,7 @@ fn dumpFetch(fetch_info: fetch.Fetch) void {
     std.debug.print("  Config Format: \"{s}\"\n", .{fetch_info.config.format});
 
     var fields_buf: [256]u8 = undefined;
-    var fields_fbs = std.io.fixedBufferStream(&fields_buf);
-    var fields_writer = fields_fbs.writer();
+    var fields_writer = Io.Writer.fixed(&fields_buf);
 
     var first = true;
     inline for (comptime std.meta.fields(fetch.config.Placeholder)) |field| {
@@ -56,7 +55,7 @@ fn dumpFetch(fetch_info: fetch.Fetch) void {
         }
     }
 
-    std.debug.print("  Needed Fields: {s}\n", .{fields_buf[0..fields_fbs.pos]});
+    std.debug.print("  Needed Fields: {s}\n", .{fields_buf[0..fields_writer.end]});
     std.debug.print("  Components:\n", .{});
 
     inline for (std.meta.fields(@TypeOf(fetch_info))) |field| {
@@ -79,6 +78,11 @@ fn dumpFetch(fetch_info: fetch.Fetch) void {
 
 fn dumpComponent(name: []const u8, component: anytype) void {
     const T = @TypeOf(component);
+
+    if (std.mem.eql(u8, name, "color_support") and @hasField(T, "basic") and @hasField(T, "truecolor")) {
+        std.debug.print("    {s}: truecolor={}, 256={}, basic={}\n", .{ name, component.truecolor, component.color256, component.basic });
+        return;
+    }
 
     if (std.mem.eql(u8, name, "terminal_info") and @hasField(T, "name") and @hasField(T, "color_support")) {
         const terminal = component;

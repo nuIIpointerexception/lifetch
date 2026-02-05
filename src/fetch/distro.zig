@@ -1,5 +1,5 @@
 const std = @import("std");
-const fs = std.fs;
+const Io = std.Io;
 const mem = std.mem;
 
 const log = @import("../log.zig");
@@ -13,7 +13,7 @@ pub const DistroError = error{
     ReleaseFileNotFound,
     BufferTooSmall,
     OutOfMemory,
-} || fs.File.OpenError;
+} || std.Io.File.OpenError;
 
 const ReleaseInfo = struct {
     name: []const u8,
@@ -62,16 +62,15 @@ pub const Distro = struct {
         return id;
     }
 
-    pub fn init(allocator: std.mem.Allocator) DistroError!Distro {
+    pub fn init(allocator: std.mem.Allocator, io: Io) DistroError!Distro {
         var logger = log.ScopedLogger.init("distro");
         var release_buf: [max_release_len]u8 = undefined;
 
         for (distro_files) |df| {
-            const file = fs.cwd().openFile(df.path, .{ .mode = .read_only }) catch |err| switch (err) {
+            _ = Io.Dir.openFileAbsolute(io, df.path, .{}) catch |err| switch (err) {
                 error.FileNotFound => continue,
                 else => |e| return e,
             };
-            file.close();
 
             return Distro{
                 .name = try allocator.dupe(u8, df.name),
@@ -83,7 +82,7 @@ pub const Distro = struct {
         }
 
         for (release_files) |path| {
-            if (readReleaseFile(allocator, path, &release_buf)) |info| {
+            if (readReleaseFile(allocator, io, path, &release_buf)) |info| {
                 return Distro{
                     .name = info.name,
                     .version = info.version,
@@ -100,11 +99,10 @@ pub const Distro = struct {
         return DistroError.DistroDetectionFailed;
     }
 
-    fn readReleaseFile(allocator: std.mem.Allocator, path: []const u8, buf: []u8) !ReleaseInfo {
-        const file = try fs.cwd().openFile(path, .{ .mode = .read_only });
-        defer file.close();
+    fn readReleaseFile(allocator: std.mem.Allocator, io: Io, path: []const u8, buf: []u8) !ReleaseInfo {
+        const file = try Io.Dir.openFileAbsolute(io, path, .{});
 
-        const bytes_read = try file.readAll(buf);
+        const bytes_read = try Io.File.readPositionalAll(file, io, buf, 0);
         const content = buf[0..bytes_read];
 
         var name_value: ?[]const u8 = null;

@@ -1,5 +1,5 @@
 const std = @import("std");
-const fs = std.fs;
+const Io = std.Io;
 const mem = std.mem;
 
 const log = @import("../log.zig");
@@ -16,20 +16,22 @@ pub const Uptime = struct {
     allocator: std.mem.Allocator,
     logger: log.ScopedLogger,
 
-    pub fn init(allocator: std.mem.Allocator) UptimeError!Uptime {
+    pub fn init(allocator: std.mem.Allocator, io: Io) UptimeError!Uptime {
         var logger = log.ScopedLogger.init("uptime");
 
-        const uptime_file = fs.openFileAbsolute("/proc/uptime", .{ .mode = .read_only }) catch |err| {
+        const uptime_file = Io.Dir.openFileAbsolute(io, "/proc/uptime", .{}) catch |err| {
             logger.err("Failed to open uptime: {}", .{err});
             return UptimeError.UptimeReadFailed;
         };
-        defer uptime_file.close();
 
         var uptime_buf: [32]u8 = undefined;
-        const uptime_str = uptime_file.reader().readUntilDelimiter(&uptime_buf, ' ') catch |err| {
+        const bytes_read = Io.File.readPositionalAll(uptime_file, io, &uptime_buf, 0) catch |err| {
             logger.err("Failed to read uptime: {}", .{err});
             return UptimeError.UptimeReadFailed;
         };
+
+        const space_idx = mem.indexOfScalar(u8, uptime_buf[0..bytes_read], ' ') orelse bytes_read;
+        const uptime_str = uptime_buf[0..space_idx];
 
         const uptime_float = std.fmt.parseFloat(f64, uptime_str) catch |err| {
             logger.err("Failed to parse uptime: {}", .{err});
