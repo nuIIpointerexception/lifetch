@@ -179,8 +179,7 @@ pub const Config = struct {
                     };
                 } else if (getColorForTag(tag) == null and getStyleForTag(tag) == null) {
                     var valid = false;
-                    inline for (std.meta.fields(Placeholder)) |field| {
-                        const ph = @field(Placeholder, field.name);
+                    inline for (comptime std.enums.values(Placeholder)) |ph| {
                         if (mem.eql(u8, format[i .. end_idx + 1], ph.symbol())) {
                             valid = true;
                             break;
@@ -199,11 +198,10 @@ pub const Config = struct {
 
     fn detectNeededFields(format: []const u8) std.EnumSet(Placeholder) {
         var fields = std.EnumSet(Placeholder){};
-        inline for (std.meta.fields(Placeholder)) |field| {
-            const placeholder = @field(Placeholder, field.name);
+        inline for (comptime std.enums.values(Placeholder)) |placeholder| {
             if (mem.indexOf(u8, format, placeholder.symbol()) != null) {
                 fields.insert(placeholder);
-                logger.debug("Detected needed field: {s}", .{field.name});
+                logger.debug("Detected needed field: {s}", .{@tagName(placeholder)});
             }
         }
         return fields;

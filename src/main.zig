@@ -9,7 +9,7 @@ const fetch = @import("fetch/root.zig");
 var logger = log.ScopedLogger.init("lifetch/main");
 
 pub fn main(init: process.Init) !void {
-    if (builtin.mode == .Debug) {
+    if (builtin.mode == .debug) {
         logger.warn("RUNNING IN DEBUG MODE", .{});
     }
 

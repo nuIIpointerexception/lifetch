@@ -29,9 +29,8 @@ pub const LogLevel = enum {
 pub const ScopedLogger = struct {
     scope: []const u8,
     min_level: LogLevel = .info,
-    mutex: std.Thread.Mutex = .{},
     buffer: [1024]u8 = undefined,
-    enabled: bool = if (builtin.mode == .Debug) true else false,
+    enabled: bool = if (builtin.mode == .debug) true else false,
 
     const Self = @This();
 
@@ -58,9 +57,6 @@ pub const ScopedLogger = struct {
     pub fn log(self: *Self, level: LogLevel, comptime fmt: []const u8, args: anytype) void {
         if (!self.shouldLog(level)) return;
 
-        self.mutex.lock();
-        defer self.mutex.unlock();
-
         // Use std.debug.print for logging to stderr (simple and reliable)
         std.debug.print("{s}[{s}][{s}]{s} ", .{
             level.color(),
@@ -77,7 +73,7 @@ pub const ScopedLogger = struct {
     }
 
     pub inline fn debug(self: *Self, comptime fmt: []const u8, args: anytype) void {
-        if (builtin.mode == .Debug) {
+        if (builtin.mode == .debug) {
             self.log(.debug, fmt, args);
         }
     }

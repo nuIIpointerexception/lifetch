@@ -3,7 +3,6 @@ const process = std.process;
 const Io = std.Io;
 
 pub const config = @import("../config.zig");
-pub const debug = @import("../debug.zig");
 pub const distro = @import("distro.zig");
 pub const host = @import("host.zig");
 pub const log = @import("../log.zig");
@@ -98,10 +97,6 @@ pub const Fetch = struct {
 
         if (cfg.needsField(.wm)) {
             fetch.wm_info = try wm.WindowManager.init(allocator, environ);
-        }
-
-        if (@import("builtin").mode == .Debug) {
-            debug.dumpStruct("Fetch information", fetch);
         }
 
         return fetch;
