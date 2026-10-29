@@ -133,6 +133,6 @@ fn fuzz_extract_format(_: void, smith: *std.testing.Smith) !void {
 }
 
 test "default_format: the shipped config's format" {
-    try std.testing.expect(mem.startsWith(u8, default_format, "{bold}{cyan}{user}@{host}"));
+    try std.testing.expect(mem.startsWith(u8, default_format, "{rgb(108,108,108)}[ {/}"));
     try std.testing.expect(mem.find(u8, default_format, "Lifetch Configuration") == null);
 }
