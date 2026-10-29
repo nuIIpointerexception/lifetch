@@ -3,11 +3,12 @@
 the fastest way to fetch your system info!
 
 ```bash
- ~ zig build --release=fast && hyperfine --warmup 10 --runs 1000 'zig-out/bin/lifetch'
-Benchmark 1: zig-out/bin/lifetch
-  Time (mean ± σ):     264.4 µs ± 144.3 µs    [User: 253.7 µs, System: 492.1 µs]
-  Range (min … max):     0.0 µs … 906.6 µs    1000 runs
+ ~ zig build --release=fast && hyperfine -N --warmup 500 --runs 5000 'zig-out/bin/lifetch'
+Benchmark 1: zig-out/bin/lifetch (5000 runs)
+  Wall Time    100.2 µs  ±    10.4 µs      83.1 µs  …   402.4 µs
 ```
+
+40 KB static binary, about 20 syscalls, no heap.
 
 ## tested on
 
@@ -17,7 +18,7 @@ Benchmark 1: zig-out/bin/lifetch
 ## config
 
 generated inside your home directory at
-`~/.config/lifetch/config.ini`
+`~/.config/lifetch/config`
 
 default config can also be found [here](config.ini)
 

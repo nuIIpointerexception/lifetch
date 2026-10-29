@@ -1,276 +1,138 @@
 const std = @import("std");
-const fs = std.fs;
+const linux = std.os.linux;
 const mem = std.mem;
-const process = std.process;
-const Io = std.Io;
 
-const color = @import("color.zig");
-const log = @import("log.zig");
+const out = @import("out.zig");
+const sys = @import("sys.zig");
 
-const default_config = @embedFile("config");
+const default_file = @embedFile("config");
 
-pub const ConfigError = error{
-    HomeDirNotFound,
-    ConfigDirCreationFailed,
-    ConfigFileCreationFailed,
-    ConfigFileReadFailed,
-    ConfigParseError,
-    OutOfMemory,
-    InvalidColorFormat,
-    InvalidStyleFormat,
+pub const default_format: []const u8 = blk: {
+    @setEvalBranchQuota(default_file.len * 100);
+    var buf = default_file.*;
+    const format = extract_format(&buf).?;
+    const final = format[0..format.len].*;
+    break :blk &final;
 };
 
-pub const Placeholder = enum {
-    user,
-    host,
-    shell,
-    term,
-    uptime,
-    pkgs,
-    session,
-    distro,
-    distro_pretty,
-    wm,
+pub const file_len_max = 4096;
+pub const path_suffix = "/.config/lifetch/config";
 
-    pub fn symbol(self: Placeholder) []const u8 {
-        return switch (self) {
-            .user => "{user}",
-            .host => "{host}",
-            .shell => "{shell}",
-            .term => "{term}",
-            .uptime => "{uptime}",
-            .pkgs => "{pkgs}",
-            .session => "{session}",
-            .distro => "{distro}",
-            .distro_pretty => "{distro_pretty}",
-            .wm => "{wm}",
-        };
-    }
-};
-
-fn getColorForTag(tag: []const u8) ?color.Color {
-    if (mem.eql(u8, tag, "black")) return .black;
-    if (mem.eql(u8, tag, "red")) return .red;
-    if (mem.eql(u8, tag, "green")) return .green;
-    if (mem.eql(u8, tag, "yellow")) return .yellow;
-    if (mem.eql(u8, tag, "blue")) return .blue;
-    if (mem.eql(u8, tag, "magenta")) return .magenta;
-    if (mem.eql(u8, tag, "cyan")) return .cyan;
-    if (mem.eql(u8, tag, "white")) return .white;
-    return null;
+comptime {
+    std.debug.assert(default_file.len < file_len_max);
 }
 
-fn getStyleForTag(tag: []const u8) ?[]const u8 {
-    if (mem.eql(u8, tag, "bold")) return color.Style.bold;
-    if (mem.eql(u8, tag, "dim")) return color.Style.dim;
-    if (mem.eql(u8, tag, "italic")) return color.Style.italic;
-    if (mem.eql(u8, tag, "underline")) return color.Style.underline;
-    if (mem.eql(u8, tag, "blink")) return color.Style.blink;
-    if (mem.eql(u8, tag, "reverse")) return color.Style.reverse;
-    if (mem.eql(u8, tag, "hidden")) return color.Style.hidden;
-    if (mem.eql(u8, tag, "strike")) return color.Style.strike;
-    return null;
-}
-
-fn parseRgbTag(tag: []const u8) !color.Rgb {
-    if (!mem.startsWith(u8, tag, "rgb(") or !mem.endsWith(u8, tag, ")")) {
-        return ConfigError.InvalidColorFormat;
-    }
-
-    const rgb_content = tag[4 .. tag.len - 1];
-    var values: [3]u8 = undefined;
-    var value_idx: usize = 0;
-    var num_start: usize = 0;
-
-    for (rgb_content, 0..) |c, i| {
-        if (c == ',' or i == rgb_content.len - 1) {
-            const num_end = if (i == rgb_content.len - 1) i + 1 else i;
-            const num_str = mem.trim(u8, rgb_content[num_start..num_end], &std.ascii.whitespace);
-            values[value_idx] = std.fmt.parseInt(u8, num_str, 10) catch return ConfigError.InvalidColorFormat;
-            value_idx += 1;
-            if (value_idx > 2) break;
-            num_start = i + 1;
-        }
-    }
-
-    if (value_idx != 3) return ConfigError.InvalidColorFormat;
-    return color.Rgb.init(values[0], values[1], values[2]);
-}
+pub const Error = error{ ConfigTooLarge, ConfigUnreadable };
 
 pub const Config = struct {
-    format: []const u8 = default_config,
-    needed_fields: std.EnumSet(Placeholder) = .{},
+    buf: [file_len_max]u8,
+    create_failed: bool,
 
-    var config_buf: [2048]u8 = undefined;
-    var arena: std.heap.ArenaAllocator = undefined;
-    var logger: log.ScopedLogger = undefined;
-
-    pub fn getAllocator() mem.Allocator {
-        return arena.allocator();
-    }
-
-    fn getOrCreateConfigFile(allocator: mem.Allocator, io: Io, environ: process.Environ) ![]const u8 {
-        const home_dir = process.Environ.getPosix(environ, "HOME") orelse {
-            logger.err("HOME environment variable not found", .{});
-            return ConfigError.HomeDirNotFound;
-        };
-
-        const config_dir = try Io.Dir.path.join(allocator, &.{ home_dir, ".config", "lifetch" });
-        defer allocator.free(config_dir);
-
-        // Create config directory if it doesn't exist (createDirAbsolute handles existing dirs)
-        Io.Dir.createDirAbsolute(io, config_dir, .default_dir) catch |err| {
-            if (err != error.PathAlreadyExists) {
-                logger.err("Failed to create config directory: {}", .{err});
-                return ConfigError.ConfigDirCreationFailed;
+    /// Reads `home ++ path_suffix`, writing the default file there when it is missing. A file
+    /// without a format line uses the default format. The result may point into `self`.
+    pub fn load(self: *Config, home: ?[]const u8) Error![]const u8 {
+        self.create_failed = false;
+        const parts = .{ home orelse return default_format, path_suffix };
+        const path = out.join_z(&self.buf, &parts) orelse return default_format;
+        const fd = sys.open(path, .{ .ACCMODE = .RDONLY, .CLOEXEC = true }, 0) catch |err| {
+            switch (err) {
+                error.FileNotFound => self.create_failed = !create(&self.buf, path.len),
+                error.OpenFailed => return error.ConfigUnreadable,
             }
+            return default_format;
         };
-
-        const config_path = try Io.Dir.path.join(allocator, &.{ config_dir, "config" });
-
-        // Check if config file exists, create if not
-        _ = Io.Dir.openFileAbsolute(io, config_path, .{}) catch |err| {
-            if (err == error.FileNotFound) {
-                logger.info("Creating default config file", .{});
-                const new_file = Io.Dir.createFileAbsolute(io, config_path, .{ .truncate = false }) catch {
-                    return ConfigError.ConfigFileCreationFailed;
-                };
-                var write_buf: [4096]u8 = undefined;
-                var writer = Io.File.Writer.initStreaming(new_file, io, &write_buf);
-                _ = writer.interface.write(default_config) catch {
-                    return ConfigError.ConfigFileCreationFailed;
-                };
-                writer.interface.flush() catch {
-                    return ConfigError.ConfigFileCreationFailed;
-                };
-            } else {
-                return ConfigError.ConfigFileReadFailed;
-            }
-            return config_path;
-        };
-
-        return config_path;
+        defer sys.close(fd);
+        const len = sys.read(fd, &self.buf) catch return error.ConfigUnreadable;
+        if (len == self.buf.len) return error.ConfigTooLarge;
+        return extract_format(self.buf[0..len]) orelse default_format;
     }
-
-    fn validateFormat(format: []const u8) !void {
-        if (format.len == 0) {
-            logger.err("Empty format string", .{});
-            return ConfigError.ConfigParseError;
-        }
-
-        var i: usize = 0;
-        while (i < format.len) : (i += 1) {
-            if (format[i] == '{') {
-                const end_idx = mem.indexOfScalarPos(u8, format, i, '}') orelse {
-                    logger.err("Unclosed tag at position {}", .{i});
-                    return ConfigError.ConfigParseError;
-                };
-                const tag = format[i + 1 .. end_idx];
-
-                if (mem.startsWith(u8, tag, "/")) {
-                    i = end_idx;
-                    continue;
-                }
-
-                if (mem.startsWith(u8, tag, "rgb(")) {
-                    _ = parseRgbTag(tag) catch {
-                        logger.err("Invalid RGB format: {s}", .{tag});
-                        return ConfigError.InvalidColorFormat;
-                    };
-                } else if (getColorForTag(tag) == null and getStyleForTag(tag) == null) {
-                    var valid = false;
-                    inline for (comptime std.enums.values(Placeholder)) |ph| {
-                        if (mem.eql(u8, format[i .. end_idx + 1], ph.symbol())) {
-                            valid = true;
-                            break;
-                        }
-                    }
-                    if (!valid) {
-                        logger.err("Invalid tag: {s}", .{tag});
-                        return ConfigError.ConfigParseError;
-                    }
-                }
-
-                i = end_idx;
-            }
-        }
-    }
-
-    fn detectNeededFields(format: []const u8) std.EnumSet(Placeholder) {
-        var fields = std.EnumSet(Placeholder){};
-        inline for (comptime std.enums.values(Placeholder)) |placeholder| {
-            if (mem.indexOf(u8, format, placeholder.symbol()) != null) {
-                fields.insert(placeholder);
-                logger.debug("Detected needed field: {s}", .{@tagName(placeholder)});
-            }
-        }
-        return fields;
-    }
-
-    pub fn init(io: Io, environ: process.Environ) !Config {
-        logger = log.ScopedLogger.init("config");
-        logger.info("Initializing config", .{});
-
-        arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
-        errdefer arena.deinit();
-
-        var self = Config{};
-
-        const config_path = try getOrCreateConfigFile(arena.allocator(), io, environ);
-        defer arena.allocator().free(config_path);
-
-        const file = Io.Dir.openFileAbsolute(io, config_path, .{}) catch {
-            logger.err("Failed to open config file: {s}", .{config_path});
-            return ConfigError.ConfigFileReadFailed;
-        };
-        defer file.close(io);
-
-        const bytes_read = Io.File.readPositionalAll(file, io, &config_buf, 0) catch {
-            logger.err("Failed to read config file", .{});
-            return ConfigError.ConfigFileReadFailed;
-        };
-
-        var format_lines: std.ArrayList(u8) = .empty;
-        defer format_lines.deinit(arena.allocator());
-
-        var lines = mem.splitScalar(u8, config_buf[0..bytes_read], '\n');
-        var found_format = false;
-
-        while (lines.next()) |line| {
-            const trimmed = mem.trim(u8, line, &std.ascii.whitespace);
-            if (trimmed.len == 0 or trimmed[0] == '#') continue;
-
-            if (!found_format) {
-                if (mem.startsWith(u8, trimmed, "format = ")) {
-                    found_format = true;
-                    try format_lines.appendSlice(arena.allocator(), trimmed["format = ".len..]);
-                }
-            } else {
-                try format_lines.append(arena.allocator(), '\n');
-                try format_lines.appendSlice(arena.allocator(), trimmed);
-            }
-        }
-
-        if (format_lines.items.len > 0) {
-            self.format = try arena.allocator().dupe(u8, format_lines.items);
-            try validateFormat(self.format);
-            self.needed_fields = detectNeededFields(self.format);
-            logger.info("Successfully loaded config with format length: {}", .{self.format.len});
-        } else {
-            logger.warn("No format found in config, using default", .{});
-        }
-
-        return self;
-    }
-
-    pub fn deinit(self: *Config) void {
-        logger.debug("Cleaning up config resources", .{});
-        _ = self;
-        arena.deinit();
-    }
-
-    pub fn needsField(self: *const Config, field: Placeholder) bool {
-        return self.needed_fields.contains(field);
-    }
-
 };
+
+fn create(buf: *[file_len_max]u8, path_len: usize) bool {
+    const file_at = path_len - "/config".len;
+    const dir_at = file_at - "/lifetch".len;
+    for ([_]usize{ dir_at, file_at }) |end| {
+        buf[end] = 0;
+        const status = sys.mkdir(@ptrCast(buf));
+        buf[end] = '/';
+        if (status != .SUCCESS and status != .EXIST) return false;
+    }
+    const flags: linux.O = .{ .ACCMODE = .WRONLY, .CREAT = true, .EXCL = true, .CLOEXEC = true };
+    const fd = sys.open(@ptrCast(buf), flags, 0o644) catch return false;
+    defer sys.close(fd);
+    return sys.write_all(fd, default_file);
+}
+
+/// In place: the value after `format = ` plus each later line that is neither blank nor a
+/// comment, joined with newlines.
+pub fn extract_format(text: []u8) ?[]const u8 {
+    const key = "format = ";
+    const space = &std.ascii.whitespace;
+    var len: usize = 0;
+    var found = false;
+    var line_start: usize = 0;
+    while (line_start < text.len) {
+        const line_end = mem.findScalarPos(u8, text, line_start, '\n') orelse text.len;
+        const line = text[line_start..line_end];
+        const trimmed_start = line_start + (line.len - mem.trimStart(u8, line, space).len);
+        const trimmed = mem.trim(u8, line, space);
+        line_start = line_end + 1;
+        if (trimmed.len == 0 or trimmed[0] == '#') continue;
+        var skip: usize = 0;
+        if (found) {
+            text[len] = '\n';
+            len += 1;
+        } else if (mem.startsWith(u8, trimmed, key)) {
+            skip = key.len;
+            found = true;
+        } else continue;
+        const part_start = trimmed_start + skip;
+        const part_len = trimmed.len - skip;
+        std.debug.assert(len <= part_start);
+        mem.copyForwards(u8, text[len..][0..part_len], text[part_start..][0..part_len]);
+        len += part_len;
+    }
+    return if (found) text[0..len] else null;
+}
+
+test "extract_format: joins continuation lines, skips comments" {
+    var buf =
+        \\# comment
+        \\other = 1
+        \\format = {user}@{host}
+        \\
+        \\  # inner comment
+        \\{shell}
+        \\  {term}
+    .*;
+    const format = extract_format(&buf).?;
+    try std.testing.expectEqualStrings("{user}@{host}\n{shell}\n{term}", format);
+    var none = "# only\n".*;
+    try std.testing.expect(extract_format(&none) == null);
+}
+
+test "extract_format: in place, never longer than its input, no comment lines" {
+    try std.testing.fuzz({}, fuzz_extract_format, .{ .corpus = &.{
+        "format = a\n  b\n# c\n\n d ",
+        "format = ",
+        "\n\nformat = {x}\n",
+        default_file,
+    } });
+}
+
+fn fuzz_extract_format(_: void, smith: *std.testing.Smith) !void {
+    var buf: [512]u8 = undefined;
+    const len = smith.slice(&buf);
+    const format = extract_format(buf[0..len]) orelse return;
+    try std.testing.expect(format.len <= len);
+    var lines = mem.splitScalar(u8, format, '\n');
+    _ = lines.next();
+    while (lines.next()) |line| {
+        try std.testing.expect(line.len > 0 and line[0] != '#');
+    }
+}
+
+test "default_format: the shipped config's format" {
+    try std.testing.expect(mem.startsWith(u8, default_format, "{bold}{cyan}{user}@{host}"));
+    try std.testing.expect(mem.find(u8, default_format, "Lifetch Configuration") == null);
+}
