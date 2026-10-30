@@ -297,6 +297,21 @@ test "init_env: first definition wins, unknown names are skipped" {
     try std.testing.expect(env.HOME == null);
 }
 
+test "init_env: a value over 64 KiB is read whole" {
+    // Linux allows one environment string up to 128 KiB. A scan that stops short of the NUL
+    // hands back a slice whose claimed sentinel is not there.
+    const len = 70_000;
+    var buf: [5 + len + 1]u8 = undefined;
+    @memcpy(buf[0..5], "USER=");
+    @memset(buf[5..][0..len], 'a');
+    buf[buf.len - 1] = 0;
+    const entry: [*:0]u8 = @ptrCast(&buf);
+    var entries = [_:null]?[*:0]u8{entry};
+    const env = init_env(.{ .slice = &entries });
+    try std.testing.expectEqual(@as(usize, len), env.USER.?.len);
+    try std.testing.expectEqual(@as(u8, 'a'), env.USER.?[len - 1]);
+}
+
 test "format_uptime: minute, hour and day forms" {
     var buf: Uptime = undefined;
     try std.testing.expectEqualStrings("0m", format_uptime(59, &buf));
