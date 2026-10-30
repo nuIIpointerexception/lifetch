@@ -196,6 +196,8 @@ fn format_percent_text(percent: u64, buf: *PercentBuf) []const u8 {
 /// `memcpy`, whose compiler_rt copy sits on a cold page at the end of the image — a first-touch
 /// page fault per run in a binary where the whole startup is a handful; the volatile load keeps
 /// this loop from being turned back into such a call.
+/// The copy runs forward, so `dst` and `src` may overlap only when `dst.ptr <= src.ptr`: a copy
+/// that runs back over its own output would read bytes it has already written.
 pub inline fn copy(dst: []u8, src: []const u8) void {
     const s: [*]const volatile u8 = @ptrCast(src.ptr);
     for (0..src.len) |i| dst[i] = s[i];
