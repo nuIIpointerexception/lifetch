@@ -72,11 +72,27 @@ comptime {
     std.debug.assert(@sizeOf(usize) == 8);
 }
 
-/// `f_type` of `struct statfs`, its first field.
-pub fn fs_type(path: [*:0]const u8, out: *u64) linux.E {
+/// Five size fields of `struct statfs` in x86-64 order; the rest of the record is skipped.
+pub const Statfs = struct { f_type: u64, f_bsize: u64, f_blocks: u64, f_bfree: u64, f_bavail: u64 };
+
+pub fn statfs(path: [*:0]const u8, out: *Statfs) linux.E {
     var buf: [16]u64 = undefined;
     const status = errno(linux.syscall2(.statfs, @intFromPtr(path), @intFromPtr(&buf)));
-    if (status == .SUCCESS) out.* = buf[0];
+    if (status == .SUCCESS) out.* = .{
+        .f_type = buf[0],
+        .f_bsize = buf[1],
+        .f_blocks = buf[2],
+        .f_bfree = buf[3],
+        .f_bavail = buf[4],
+    };
+    return status;
+}
+
+/// `f_type` of `struct statfs`, its first field.
+pub fn fs_type(path: [*:0]const u8, out: *u64) linux.E {
+    var st: Statfs = undefined;
+    const status = statfs(path, &st);
+    if (status == .SUCCESS) out.* = st.f_type;
     return status;
 }
 
