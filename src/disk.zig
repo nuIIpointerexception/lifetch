@@ -9,8 +9,8 @@ const out = @import("out.zig");
 pub const max_disks = 8;
 
 pub const Slot = struct {
-    /// Mount path, unescaped: the per-slot NUL-terminated copy in `Storage` that `statfs` was
-    /// called on, so the slice is stable and safe to hand to a syscall.
+    /// Mount path, unescaped: a slice into the mounts text in `Storage`, stable for the run (the
+    /// only NUL-terminated copy is the scratch `collect` hands to `statfs`).
     mount: []const u8,
     /// Device string, unescaped: a slice into the mounts text in `Storage`.
     dev: []const u8,
@@ -26,7 +26,8 @@ pub const Slots = struct { items: [max_disks]Slot, len: usize };
 /// /proc/self/mounts is small; 8 KiB holds a big one, and anything past that is a partial line
 /// that gets cut at the last newline anyway.
 const mounts_len = 8 * 1024;
-/// A mount path has to fit NUL-terminated for `statfs`; one that cannot be probed is skipped.
+/// A mount path has to fit NUL-terminated in the one scratch copy for `statfs`; one that cannot
+/// is skipped. Slots slice the mounts text instead of per-slot copies, so one scratch suffices.
 const path_len = linux.PATH_MAX;
 
 const size_len = @typeInfo(out.SizeBuf).array.len;
@@ -45,7 +46,8 @@ const SlotText = struct {
 /// Every buffer of a run in one object, so first touches land on as few stack pages as possible.
 pub const Storage = struct {
     mounts: [mounts_len]u8,
-    paths: [max_disks][path_len]u8,
+    /// One NUL-terminated scratch path, reused for every `statfs`.
+    path: [path_len]u8,
     texts: [max_disks]SlotText,
 };
 
@@ -57,18 +59,18 @@ pub fn collect(storage: *Storage, opts: out.Opts) Slots {
     const read = sys.read_file(mounts_path, &storage.mounts) catch return slots;
     // A read that filled the buffer may have cut a line in half; parse whole lines only.
     const text = if (read.len == storage.mounts.len) cut_at_last_newline(read) else read;
-    const found = scan(text, &storage.paths);
+    const found = scan(text);
     for (found.items[0..found.len]) |candidate| {
+        // The only NUL-terminated copy of a path: `statfs` needs one, the slices do not.
+        const path = out.join_z(&storage.path, &.{candidate.mount}) orelse continue;
         var fs: sys.Statfs = undefined;
-        if (sys.statfs(candidate.mount, &fs) != .SUCCESS) continue;
-        const used = clamp_mul(fs.f_blocks -| fs.f_bfree, fs.f_bsize);
-        const total = clamp_mul(fs.f_blocks, fs.f_bsize);
-        // The `df` convention: blocks reserved for root stay out of the denominator.
-        const avail = clamp_mul(fs.f_bavail, fs.f_bsize);
+        if (sys.statfs(path, &fs) != .SUCCESS) continue;
+        const counts = usage(&fs);
         const texts = &storage.texts[slots.len];
-        const used_text = out.format_size(used, opts, &texts.used);
-        const total_text = out.format_size(total, opts, &texts.total);
-        const percent_text = out.format_percent(used, used +| avail, &texts.percent);
+        const used_text = out.format_size(counts.used, opts, &texts.used);
+        const total_text = out.format_size(counts.total, opts, &texts.total);
+        // The `df` convention throughout: the ceiling-rounded `Use%` over used + avail.
+        const percent_text = out.format_percent_ceil(counts.used, counts.used +| counts.avail, &texts.percent);
         slots.items[slots.len] = .{
             .mount = candidate.mount,
             .dev = candidate.dev,
@@ -84,7 +86,24 @@ pub fn collect(storage: *Storage, opts: out.Opts) Slots {
     return slots;
 }
 
-/// `f_blocks * f_bsize` in u128, clamped instead of wrapped when a filesystem reports huge counts.
+/// The byte counts one statfs record reports, df's arithmetic: blocks reserved for root count as
+/// used (`Used`) but stay out of `avail` (`Avail`), so used + avail is the `Use%` denominator.
+fn usage(fs: *const sys.Statfs) struct { used: u64, total: u64, avail: u64 } {
+    const unit = block_unit(fs);
+    return .{
+        .used = clamp_mul(fs.f_blocks -| fs.f_bfree, unit),
+        .total = clamp_mul(fs.f_blocks, unit),
+        .avail = clamp_mul(fs.f_bavail, unit),
+    };
+}
+
+/// The byte unit of the block counts: `f_frsize` when the filesystem reports one (df reads the
+/// counts in these units too), `f_bsize` when `f_frsize` is 0.
+fn block_unit(fs: *const sys.Statfs) u64 {
+    return if (fs.f_frsize != 0) fs.f_frsize else fs.f_bsize;
+}
+
+/// `blocks * unit` in u128, clamped instead of wrapped when a filesystem reports huge counts.
 fn clamp_mul(a: u64, b: u64) u64 {
     return @intCast(@min(@as(u128, a) * b, std.math.maxInt(u64)));
 }
@@ -96,13 +115,14 @@ fn cut_at_last_newline(text: []u8) []u8 {
     return text[0 .. last + 1];
 }
 
-const Candidate = struct { dev: []const u8, mount: [:0]const u8 };
+const Candidate = struct { dev: []const u8, mount: []const u8 };
 
 const Candidates = struct { items: [max_disks]Candidate, len: usize };
 
-/// The pure half of `collect`: allowlist the fstype, keep the first mount per device, and copy
-/// each kept mount path NUL-terminated into `paths`. Escape decoding shrinks `text` in place.
-fn scan(text: []u8, paths: *[max_disks][path_len]u8) Candidates {
+/// The pure half of `collect`: allowlist the fstype, keep the first mount per device. Escape
+/// decoding shrinks `text` in place, and the kept dev and mount slice it: `Slot.mount`/`Slot.dev`
+/// point here, and only `collect`'s statfs scratch ever copies a path.
+fn scan(text: []u8) Candidates {
     var found: Candidates = .{ .items = undefined, .len = 0 };
     var rest = text;
     while (rest.len > 0) {
@@ -112,10 +132,7 @@ fn scan(text: []u8, paths: *[max_disks][path_len]u8) Candidates {
         const parsed = parse_line(line) orelse continue;
         if (!fstype_allowed(parsed.fstype)) continue;
         if (seen(&found, parsed.dev)) continue;
-        // Lines in the mounts buffer end at a newline, not a NUL: the copy is what `statfs`
-        // gets, and what `Slot.mount` later slices.
-        const mount = out.join_z(&paths[found.len], &.{parsed.mount}) orelse continue;
-        found.items[found.len] = .{ .dev = parsed.dev, .mount = mount };
+        found.items[found.len] = .{ .dev = parsed.dev, .mount = parsed.mount };
         found.len += 1;
         if (found.len == max_disks) break; // extra mounts are ignored
     }
@@ -143,13 +160,19 @@ fn parse_line(line: []u8) ?Line {
         field.* = rest[0..space];
         rest = rest[space + 1 ..];
     }
-    return .{ .dev = unescape(fields[0]), .mount = unescape(fields[1]), .fstype = fields[2] };
+    return .{
+        .dev = unescape(fields[0]) orelse return null,
+        .mount = unescape(fields[1]) orelse return null,
+        .fstype = fields[2],
+    };
 }
 
 /// The mounts table spells space, tab, newline and backslash as three-digit octal. Any valid
 /// octal triple decodes (the four spellings above are all the kernel writes); anything else keeps
-/// its bytes. Unescaping only shrinks, so it is safe in place.
-fn unescape(text: []u8) []const u8 {
+/// its bytes. A NUL byte, decoded or literal, rejects the whole field: it would truncate the
+/// `statfs` path while the slot shows more, and the kernel never writes one into this file.
+/// Unescaping only shrinks, so it is safe in place.
+fn unescape(text: []u8) ?[]const u8 {
     var len: usize = 0;
     var i: usize = 0;
     while (i < text.len) {
@@ -164,12 +187,14 @@ fn unescape(text: []u8) []const u8 {
                 byte = byte * 8 + (digit - '0');
             }
             if (octal and byte <= std.math.maxInt(u8)) {
+                if (byte == 0) return null; // a decoded NUL would truncate the statfs path
                 text[len] = @intCast(byte);
                 len += 1;
                 i += 4;
                 continue;
             }
         }
+        if (text[i] == 0) return null;
         text[len] = text[i];
         len += 1;
         i += 1;
@@ -202,8 +227,7 @@ test "scan: fstype allowlist, dev dedupe and first-seen order" {
         \\
     ;
     var text = fixture.*;
-    var paths: [max_disks][path_len]u8 = undefined;
-    const found = scan(&text, &paths);
+    const found = scan(&text);
     try std.testing.expectEqual(@as(usize, 3), found.len);
     try std.testing.expectEqualStrings("/dev/sda1", found.items[0].dev);
     try std.testing.expectEqualStrings("/", found.items[0].mount);
@@ -227,6 +251,14 @@ test "parse_line: octal escapes unescape in place" {
 
     var short = "dev mount".*;
     try std.testing.expect(parse_line(&short) == null);
+
+    // A NUL, decoded or literal, rejects the line: it would truncate the statfs path.
+    var decoded_nul = "/dev/x\\000y /my\\000mount ext4 rw 0 0".*;
+    try std.testing.expect(parse_line(&decoded_nul) == null);
+    var literal_nul = "/dev/x\x00y /m ext4 rw 0 0".*;
+    try std.testing.expect(parse_line(&literal_nul) == null);
+    var mount_nul = "/dev/x /m\x00y ext4 rw 0 0".*;
+    try std.testing.expect(parse_line(&mount_nul) == null);
 }
 
 test "cut_at_last_newline: drops a partial trailing line" {
@@ -236,6 +268,41 @@ test "cut_at_last_newline: drops a partial trailing line" {
     try std.testing.expectEqualStrings("one\ntwo\n", cut_at_last_newline(&whole));
     var single = "no-newline-anywhere".*;
     try std.testing.expectEqualStrings("", cut_at_last_newline(&single));
+}
+
+test "usage: f_frsize is the block unit, f_bsize when it is zero" {
+    const with_frsize: sys.Statfs = .{
+        .f_type = 0,
+        .f_bsize = 4096,
+        .f_blocks = 50_000_000,
+        .f_bfree = 10_900_000,
+        .f_bavail = 10_900_000,
+        .f_frsize = 1000,
+    };
+    try std.testing.expectEqual(@as(u64, 1000), block_unit(&with_frsize));
+    const u = usage(&with_frsize);
+    try std.testing.expectEqual(@as(u64, 39_100_000_000), u.used);
+    try std.testing.expectEqual(@as(u64, 50_000_000_000), u.total);
+    try std.testing.expectEqual(@as(u64, 10_900_000_000), u.avail);
+    // 39.1G of 50G is 78.2%: the df ceiling says 79%.
+    var buf: out.PercentBuf = undefined;
+    try std.testing.expectEqualStrings("79%", out.format_percent_ceil(u.used, u.used +| u.avail, &buf));
+
+    var no_frsize = with_frsize;
+    no_frsize.f_frsize = 0;
+    try std.testing.expectEqual(@as(u64, 4096), block_unit(&no_frsize));
+    try std.testing.expectEqual(@as(u64, 160_153_600_000), usage(&no_frsize).used);
+
+    // Huge counts clamp instead of wrapping.
+    const huge: sys.Statfs = .{
+        .f_type = 0,
+        .f_bsize = 4096,
+        .f_blocks = std.math.maxInt(u64),
+        .f_bfree = 0,
+        .f_bavail = 0,
+        .f_frsize = 4096,
+    };
+    try std.testing.expectEqual(@as(u64, std.math.maxInt(u64)), usage(&huge).total);
 }
 
 // `collect` is syscalls around the pure parse fns; taking its address makes `zig test` compile

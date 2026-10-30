@@ -14,18 +14,34 @@ pub const Stats = struct {
     load: []const u8,
 };
 
+/// Which parts of `Stats` a template asked for. Every source file is read only when one of its
+/// fields is used: `{cpu}` costs one /proc/cpuinfo read, `{cpu_percent}` the /proc/stat read, and
+/// a source no field needs is never opened.
+pub const Need = struct {
+    model: bool = false,
+    cores: bool = false,
+    threads: bool = false,
+    percent: bool = false,
+    load: bool = false,
+};
+
 /// The first line whose key names the model is well inside the first block of /proc/cpuinfo;
 /// reading only 1024 bytes keeps a many-socket machine from spilling the stack buffer.
 const cpuinfo_len = 1024;
 /// Longest real model name is under 100 bytes; cleaning only ever shrinks it.
 const model_len = 256;
-/// /sys/devices/system/cpu/possible is a handful of ranges.
-const possible_len = 32;
+/// /sys/devices/system/cpu/online is a handful of ranges.
+const online_len = 32;
 /// The aggregate "cpu " line of /proc/stat, with slack for wide jiffy counters.
 const stat_len = 256;
 /// /proc/loadavg is one line of five tokens; the 1-minute token comes first.
 const loadavg_len = 32;
 const load_len = 32;
+
+const cpuinfo_path = "/proc/cpuinfo";
+const online_path = "/sys/devices/system/cpu/online";
+const stat_path = "/proc/stat";
+const loadavg_path = "/proc/loadavg";
 
 /// Every buffer of a collection in one caller-owned object, so first touches land on as few stack
 /// pages as possible and nothing is allocated.
@@ -33,39 +49,53 @@ pub const Storage = struct {
     cpuinfo: [cpuinfo_len]u8,
     model: [model_len]u8,
     cores: out.Digits,
-    possible: [possible_len]u8,
+    online: [online_len]u8,
     threads: out.Digits,
     stat: [stat_len]u8,
     percent: out.PercentBuf,
     loadavg: [loadavg_len]u8,
     load: [load_len]u8,
 };
-
-/// Thin wrappers around the parse functions below: every source is one read of a fixed buffer,
-/// and a read failure is empty text, which parses as "unknown".
-pub fn collect(storage: *Storage) Stats {
-    const cpuinfo: []const u8 = sys.read_file("/proc/cpuinfo", &storage.cpuinfo) catch "";
-    return .{
-        .cpu = parse_model(cpuinfo, &storage.model),
-        .cpu_cores = parse_cores(cpuinfo, &storage.cores),
-        .cpu_threads = parse_possible(
-            sys.read_file("/sys/devices/system/cpu/possible", &storage.possible) catch "",
+/// Reads only the sources `need` asks for; a read failure is empty text, which parses as
+/// "unknown", and a source no field needs is never opened.
+pub fn collect(storage: *Storage, need: Need) Stats {
+    var stats: Stats = unknown();
+    if (need.model or need.cores) {
+        const cpuinfo: []const u8 = sys.read_file(cpuinfo_path, &storage.cpuinfo) catch "";
+        if (need.model) stats.cpu = parse_model(cpuinfo, &storage.model);
+        if (need.cores) stats.cpu_cores = parse_cores(cpuinfo, &storage.cores);
+    }
+    if (need.threads) {
+        stats.cpu_threads = parse_online(
+            sys.read_file(online_path, &storage.online) catch "",
             &storage.threads,
-        ),
-        .cpu_percent = parse_stat(
-            sys.read_file("/proc/stat", &storage.stat) catch "",
+        );
+    }
+    if (need.percent) {
+        stats.cpu_percent = parse_stat(
+            sys.read_file(stat_path, &storage.stat) catch "",
             &storage.percent,
-        ),
-        .load = parse_load(
-            sys.read_file("/proc/loadavg", &storage.loadavg) catch "",
+        );
+    }
+    if (need.load) {
+        stats.load = parse_load(
+            sys.read_file(loadavg_path, &storage.loadavg) catch "",
             &storage.load,
-        ),
-    };
+        );
+    }
+    return stats;
+}
+
+fn unknown() Stats {
+    const u: []const u8 = "unknown";
+    return .{ .cpu = u, .cpu_cores = u, .cpu_threads = u, .cpu_percent = u, .load = u };
 }
 
 /// The model name: the value of the first "model name" (x86), "cpu model" (arm), "Model" (device
 /// tree) or "Hardware" (arm board) line, cleaned. The keys match case-sensitively on purpose:
 /// x86's numeric "model" field sits right above "model name" and must not be read as a name.
+/// Known limitation: old ARM kernels repeat "Hardware" in every processor block, so on a board
+/// with long blocks the first named line can sit past the 1024-byte read and the model is missed.
 pub fn parse_model(text: []const u8, buf: *[model_len]u8) []const u8 {
     var it = mem.splitScalar(u8, text, '\n');
     while (it.next()) |line| {
@@ -76,7 +106,7 @@ pub fn parse_model(text: []const u8, buf: *[model_len]u8) []const u8 {
         if (!named) continue;
         const value = mem.trim(u8, line[colon + 1 ..], " \t\r");
         const len = @min(value.len, buf.len);
-        @memcpy(buf[0..len], value[0..len]);
+        out.copy(buf[0..len], value[0..len]);
         return clean_model(buf[0..len]);
     }
     return "unknown";
@@ -135,30 +165,31 @@ pub fn parse_cores(text: []const u8, buf: *out.Digits) []const u8 {
         for (value) |c| {
             if (c < '0' or c > '9') return "unknown";
         }
-        @memcpy(buf[0..value.len], value);
+        out.copy(buf[0..value.len], value);
         return buf[0..value.len];
     }
     return "unknown";
 }
 
-/// Logical CPUs, counted from the possible-mask of /sys/devices/system/cpu: ranges of CPUs the
-/// kernel can bring up ("0-31", "0-7,16-23") or a single CPU ("3").
-pub fn parse_possible(text: []const u8, buf: *out.Digits) []const u8 {
-    const count = count_possible(text) orelse return "unknown";
+/// Logical CPUs, counted from the online-mask of /sys/devices/system/cpu: ranges of CPUs the
+/// kernel has brought up ("0-31", "0-7,16-23") or a single CPU ("3"). The possible-mask is no
+/// stand-in: VMware reserves hotplug slots there ("0-127" with 4 CPUs online).
+pub fn parse_online(text: []const u8, buf: *out.Digits) []const u8 {
+    const count = count_online(text) orelse return "unknown";
     return out.format_uint(count, buf);
 }
 
 /// The sum of the inclusive ranges of a cpu list mask; null on empty or malformed text.
-fn count_possible(text: []const u8) ?u64 {
+fn count_online(text: []const u8) ?u64 {
     const mask = mem.trim(u8, text, " \t\r\n");
     if (mask.len == 0) return null;
     var total: u64 = 0;
     var it = mem.splitScalar(u8, mask, ',');
     while (it.next()) |part| {
         const dash = mem.indexOfScalar(u8, part, '-');
-        const low = parse_uint(if (dash) |at| part[0..at] else part) orelse return null;
+        const low = out.parse_uint(if (dash) |at| part[0..at] else part) orelse return null;
         if (dash) |at| {
-            const high = parse_uint(part[at + 1 ..]) orelse return null;
+            const high = out.parse_uint(part[at + 1 ..]) orelse return null;
             if (high < low) return null;
             total +|= high - low + 1;
         } else {
@@ -177,7 +208,7 @@ pub fn parse_stat(text: []const u8, buf: *out.PercentBuf) []const u8 {
     var times: [8]u64 = undefined; // user nice system idle iowait irq softirq steal
     for (&times) |*slot| {
         const token = it.next() orelse return "unknown";
-        slot.* = parse_uint(token) orelse return "unknown";
+        slot.* = out.parse_uint(token) orelse return "unknown";
     }
     const busy = times[0] +| times[1] +| times[2] +| times[5] +| times[6] +| times[7];
     const total = busy +| times[3] +| times[4];
@@ -189,20 +220,8 @@ pub fn parse_load(text: []const u8, buf: *[load_len]u8) []const u8 {
     var it = mem.tokenizeAny(u8, text, " \t\r\n");
     const token = it.next() orelse return "unknown";
     const len = @min(token.len, buf.len);
-    @memcpy(buf[0..len], token[0..len]);
+    out.copy(buf[0..len], token[0..len]);
     return buf[0..len];
-}
-
-/// Decimal text to a value; null on empty text, a non-digit or overflow.
-fn parse_uint(text: []const u8) ?u64 {
-    var value: u64 = 0;
-    for (text) |c| {
-        if (c < '0' or c > '9') return null;
-        const digit: u64 = c - '0';
-        if (value > (std.math.maxInt(u64) - digit) / 10) return null;
-        value = value * 10 + digit;
-    }
-    return if (text.len == 0) null else value;
 }
 
 const x86_cpuinfo =
@@ -263,14 +282,27 @@ test "parse_cores: first cpu cores value" {
     try std.testing.expectEqualStrings("unknown", parse_cores("model name : x\n", &digits));
 }
 
-test "parse_possible: ranges, a single CPU and empty text" {
+test "parse_online: ranges, a single CPU and empty text" {
     var digits: out.Digits = undefined;
-    try std.testing.expectEqualStrings("32", parse_possible("0-31\n", &digits));
-    try std.testing.expectEqualStrings("16", parse_possible("0-7,16-23\n", &digits));
-    try std.testing.expectEqualStrings("1", parse_possible("3\n", &digits));
-    try std.testing.expectEqualStrings("1", parse_possible("0-0\n", &digits));
-    try std.testing.expectEqualStrings("unknown", parse_possible("", &digits));
-    try std.testing.expectEqualStrings("unknown", parse_possible("0-7,\n", &digits));
+    try std.testing.expectEqualStrings("32", parse_online("0-31\n", &digits));
+    try std.testing.expectEqualStrings("16", parse_online("0-7,16-23\n", &digits));
+    try std.testing.expectEqualStrings("1", parse_online("3\n", &digits));
+    try std.testing.expectEqualStrings("1", parse_online("0-0\n", &digits));
+    try std.testing.expectEqualStrings("unknown", parse_online("", &digits));
+    try std.testing.expectEqualStrings("unknown", parse_online("0-7,\n", &digits));
+}
+
+test "collect: nothing needed opens no source" {
+    var storage: Storage = undefined;
+    // With no field asked for, `collect` reads no file and every field stays "unknown" — the
+    // pure layering the per-source gating sits on (a source a field needs is read in its own
+    // `if (need...)` branch only).
+    const none = collect(&storage, .{});
+    try std.testing.expectEqualStrings("unknown", none.cpu);
+    try std.testing.expectEqualStrings("unknown", none.cpu_cores);
+    try std.testing.expectEqualStrings("unknown", none.cpu_threads);
+    try std.testing.expectEqualStrings("unknown", none.cpu_percent);
+    try std.testing.expectEqualStrings("unknown", none.load);
 }
 
 test "parse_stat: since-boot busy share of the cpu line" {

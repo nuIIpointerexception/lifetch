@@ -72,8 +72,18 @@ comptime {
     std.debug.assert(@sizeOf(usize) == 8);
 }
 
-/// Five size fields of `struct statfs` in x86-64 order; the rest of the record is skipped.
-pub const Statfs = struct { f_type: u64, f_bsize: u64, f_blocks: u64, f_bfree: u64, f_bavail: u64 };
+/// The fields lifetch needs from `struct statfs`, in record order except for `f_frsize` (the 10th
+/// u64, index 9, of the x86-64 record); the rest of the record is skipped.
+pub const Statfs = struct {
+    f_type: u64,
+    f_bsize: u64,
+    f_blocks: u64,
+    f_bfree: u64,
+    f_bavail: u64,
+    /// Fragment size, the 10th u64 (index 9) of the record: the unit the block counts are in.
+    /// 0 when the filesystem does not report one, in which case `f_bsize` is the unit.
+    f_frsize: u64,
+};
 
 pub fn statfs(path: [*:0]const u8, out: *Statfs) linux.E {
     var buf: [16]u64 = undefined;
@@ -84,6 +94,7 @@ pub fn statfs(path: [*:0]const u8, out: *Statfs) linux.E {
         .f_blocks = buf[2],
         .f_bfree = buf[3],
         .f_bavail = buf[4],
+        .f_frsize = buf[9],
     };
     return status;
 }

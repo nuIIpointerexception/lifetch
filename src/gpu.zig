@@ -129,11 +129,9 @@ noinline fn probe(num: u8, texts: *SlotText, opts: out.Opts) Slot {
     var path_buf: [linux.PATH_MAX]u8 = undefined;
     var uevent_buf: [uevent_len]u8 = undefined;
     var read_buf: [info_len]u8 = undefined;
-    var digits: out.Digits = undefined;
-    const card = out.format_uint(num, &digits);
 
     var uevent: Uevent = .{};
-    if (read_into(&path_buf, &.{ drm_path, "/card", card, "/device/uevent" }, &uevent_buf)) |content| {
+    if (read_into(card_path(&path_buf, num, "/device/uevent"), &uevent_buf)) |content| {
         uevent = parse_uevent(content);
     }
 
@@ -154,34 +152,47 @@ noinline fn probe(num: u8, texts: *SlotText, opts: out.Opts) Slot {
 
         // Only amdgpu exposes these two in sysfs; every other driver reports "unknown".
         if (mem.eql(u8, driver, "amdgpu")) {
-            const vram_path = .{ drm_path, "/card", card, "/device/mem_info_vram_total" };
-            if (read_into(&path_buf, &vram_path, &read_buf)) |content| {
-                if (parse_dec(content)) |bytes| {
+            const vram_path = card_path(&path_buf, num, "/device/mem_info_vram_total");
+            if (read_into(vram_path, &read_buf)) |content| {
+                if (out.parse_uint(mem.trim(u8, content, " \t\n\r"))) |bytes| {
                     if (bytes > 0) vram = out.format_size(bytes, opts, &texts.vram);
                 }
             }
-            const busy_path = .{ drm_path, "/card", card, "/device/gpu_busy_percent" };
-            if (read_into(&path_buf, &busy_path, &read_buf)) |content| {
-                if (parse_dec(content)) |percent| busy = out.format_percent(percent, 100, &texts.busy);
+            const busy_path = card_path(&path_buf, num, "/device/gpu_busy_percent");
+            if (read_into(busy_path, &read_buf)) |content| {
+                if (out.parse_uint(mem.trim(u8, content, " \t\n\r"))) |percent| busy = out.format_percent(percent, 100, &texts.busy);
             }
         }
     }
     return .{ .name = name, .vram = vram, .busy = busy };
 }
 
-/// One attribute read; null when the file is missing or unreadable, which the caller reports as
-/// "unknown".
-fn read_into(path_buf: []u8, parts: []const []const u8, buf: []u8) ?[]const u8 {
-    const path = out.join_z(path_buf, parts) orelse return null;
-    return sys.read_file(path, buf) catch null;
+/// `"/sys/class/drm/card<N><suffix>"`, e.g. "/sys/class/drm/card0/device/uevent". Pure so the
+/// exact spelling is testable: the earlier /card bug lived in this join.
+fn card_path(buf: []u8, num: u8, suffix: []const u8) ?[:0]const u8 {
+    var digits: out.Digits = undefined;
+    const card = out.format_uint(num, &digits);
+    return out.join_z(buf, &.{ drm_path, "/card", card, suffix });
+}
+
+/// `"/proc/driver/nvidia/gpus/<PCI_SLOT_NAME>/information"`, e.g.
+/// "/proc/driver/nvidia/gpus/0000:01:00.0/information"; pure like `card_path`.
+fn nvidia_info_path(buf: []u8, pci_slot: []const u8) ?[:0]const u8 {
+    return out.join_z(buf, &.{ nvidia_gpus_path, "/", pci_slot, "/information" });
+}
+
+/// One attribute read; null when the path does not fit, the file is missing or unreadable, which
+/// the caller reports as "unknown".
+fn read_into(path: ?[:0]const u8, buf: []u8) ?[]const u8 {
+    const full = path orelse return null;
+    return sys.read_file(full, buf) catch null;
 }
 
 /// The "Model:" value of /proc/driver/nvidia/gpus/<PCI_SLOT_NAME>/information; null when the card
 /// has no proc entry or no model line.
 fn nvidia_model_of(pci_slot: ?[]const u8, path_buf: []u8, read_buf: []u8) ?[]const u8 {
     const slot = pci_slot orelse return null;
-    const parts = .{ nvidia_gpus_path, "/", slot, "/information" };
-    const content = read_into(path_buf, &parts, read_buf) orelse return null;
+    const content = read_into(nvidia_info_path(path_buf, slot), read_buf) orelse return null;
     return nvidia_model(content);
 }
 
@@ -250,19 +261,6 @@ fn vendor_word(pci_id: ?[]const u8) []const u8 {
     return "gpu";
 }
 
-/// A sysfs decimal attribute ("4294967296\n"); null on empty or anything non-decimal.
-fn parse_dec(text: []const u8) ?u64 {
-    const value = mem.trim(u8, text, " \t\n\r");
-    if (value.len == 0) return null;
-    var n: u64 = 0;
-    for (value) |c| {
-        if (c < '0' or c > '9') return null;
-        n = std.math.mul(u64, n, 10) catch return null;
-        n = std.math.add(u64, n, c - '0') catch return null;
-    }
-    return n;
-}
-
 test "card_index: bare card numbers only" {
     try std.testing.expectEqual(@as(?u8, 0), card_index("card0"));
     try std.testing.expectEqual(@as(?u8, 12), card_index("card12"));
@@ -310,4 +308,30 @@ test "vendor_word: table, case-insensitive and fallback" {
 // the syscall layer without the tests ever touching sysfs.
 test "collect: the syscall layer compiles without running" {
     std.testing.refAllDecls(@This());
+}
+
+test "card_path and nvidia_info_path: the exact spellings the probes use" {
+    var buf: [linux.PATH_MAX]u8 = undefined;
+    try std.testing.expectEqualStrings(
+        "/sys/class/drm/card0/device/uevent",
+        card_path(&buf, 0, "/device/uevent").?,
+    );
+    try std.testing.expectEqualStrings(
+        "/sys/class/drm/card12/device/mem_info_vram_total",
+        card_path(&buf, 12, "/device/mem_info_vram_total").?,
+    );
+    try std.testing.expectEqualStrings(
+        "/sys/class/drm/card2/device/gpu_busy_percent",
+        card_path(&buf, 2, "/device/gpu_busy_percent").?,
+    );
+    try std.testing.expectEqualStrings(
+        "/proc/driver/nvidia/gpus/0000:01:00.0/information",
+        nvidia_info_path(&buf, "0000:01:00.0").?,
+    );
+    // One buffer, reused: the second build replaces the first.
+    _ = card_path(&buf, 0, "/device/uevent").?;
+    try std.testing.expectEqualStrings(
+        "/proc/driver/nvidia/gpus/0000:02:00.0/information",
+        nvidia_info_path(&buf, "0000:02:00.0").?,
+    );
 }
