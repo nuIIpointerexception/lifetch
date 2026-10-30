@@ -56,7 +56,7 @@ const Scratch = struct {
 
 pub fn main(init: std.process.Init.Minimal) u8 {
     var scratch: Scratch = undefined;
-    scratch.env = init_env(init.environ.block);
+    scratch.env = Env.init(init.environ.block);
     const env = &scratch.env;
     const suffix = config_mod.path_suffix;
     // Every report below follows a read of the config file, which needs HOME.
@@ -188,44 +188,6 @@ fn any(fields: format.Fields, ids: anytype) bool {
     return false;
 }
 
-/// The walk `Env.init` does, but the value length is scanned here with a bounded loop instead of
-/// `std.mem.span`: LLVM turns span's NUL search into a call to `strlen`, and compiler_rt's copy
-/// sits on a cold page at the end of the image — one first-touch page fault per run in a binary
-/// whose whole startup is a handful. Same rule as `Env.init`: the first definition of a name wins.
-fn init_env(block: std.process.Environ.Block) Env {
-    var env: Env = .{};
-    for (block.slice) |entry_ptr| {
-        const entry = entry_ptr orelse continue;
-        inline for (@typeInfo(Env).@"struct".field_names) |name| {
-            const prefix = name ++ "=";
-            if (@field(env, name) == null and entry_has_prefix(entry, prefix)) {
-                const value = value_len(entry + prefix.len);
-                @field(env, name) = entry[prefix.len .. prefix.len + value :0];
-            }
-        }
-    }
-    return env;
-}
-
-/// Byte by byte: stopping at the first mismatch never reads past the terminating NUL.
-fn entry_has_prefix(entry: [*:0]const u8, comptime prefix: []const u8) bool {
-    inline for (prefix, 0..) |byte, i| {
-        if (entry[i] != byte) return false;
-    }
-    return true;
-}
-
-/// A bounded NUL scan, inline. The volatile load is the whole point: without it LLVM rewrites even
-/// the bounded shape into `min(strlen(s), bound)` — back to the cold-page call (see `init_env`).
-inline fn value_len(s: [*:0]const u8) usize {
-    const bytes: [*]const volatile u8 = @ptrCast(s);
-    var i: usize = 0;
-    while (i < std.math.maxInt(u16)) : (i += 1) {
-        if (bytes[i] == 0) return i;
-    }
-    return std.math.maxInt(u16);
-}
-
 fn hostname(storage: *Storage, uts_read: bool) []const u8 {
     if (uts_read) {
         const node = mem.sliceTo(&storage.uts.nodename, 0);
@@ -282,34 +244,6 @@ test {
     _ = @import("pkg.zig");
     _ = @import("terminal.zig");
     _ = @import("wm.zig");
-}
-
-test "init_env: first definition wins, unknown names are skipped" {
-    var entries = [_:null]?[*:0]u8{
-        @constCast("TERM=foot"),
-        @constCast("NOPE=1"),
-        @constCast("TERM=xterm"),
-        @constCast("USER="),
-    };
-    const env = init_env(.{ .slice = &entries });
-    try std.testing.expectEqualStrings("foot", env.TERM.?);
-    try std.testing.expectEqualStrings("", env.USER.?);
-    try std.testing.expect(env.HOME == null);
-}
-
-test "init_env: a value over 64 KiB is read whole" {
-    // Linux allows one environment string up to 128 KiB. A scan that stops short of the NUL
-    // hands back a slice whose claimed sentinel is not there.
-    const len = 70_000;
-    var buf: [5 + len + 1]u8 = undefined;
-    @memcpy(buf[0..5], "USER=");
-    @memset(buf[5..][0..len], 'a');
-    buf[buf.len - 1] = 0;
-    const entry: [*:0]u8 = @ptrCast(&buf);
-    var entries = [_:null]?[*:0]u8{entry};
-    const env = init_env(.{ .slice = &entries });
-    try std.testing.expectEqual(@as(usize, len), env.USER.?.len);
-    try std.testing.expectEqual(@as(u8, 'a'), env.USER.?[len - 1]);
 }
 
 test "format_uptime: minute, hour and day forms" {
