@@ -35,7 +35,8 @@ pub const Env = struct {
                     inline for (names) |name| {
                         if (name[0] != initial) continue;
                         if (@field(env, name) == null and has_prefix(entry, name ++ "=")) {
-                            @field(env, name) = std.mem.span(entry + name.len + 1);
+                            const start = name.len + 1;
+                            @field(env, name) = entry[start .. start + value_len(entry + start) :0];
                         }
                     }
                 }
@@ -51,6 +52,19 @@ fn has_prefix(entry: [*:0]const u8, comptime prefix: []const u8) bool {
         if (entry[i] != byte) return false;
     }
     return true;
+}
+
+/// The length of the value at `s`, byte by byte. The volatile load is the whole point: without
+/// it LLVM rewrites the scan into a call to `strlen`, and compiler_rt's copy sits on a cold
+/// page at the end of the image — one first-touch page fault per run in a binary whose whole
+/// startup is a handful. The kernel terminates every environment string with a NUL, so the
+/// scan ends there: a cap would hand back a slice whose claimed sentinel is not there.
+inline fn value_len(s: [*:0]const u8) usize {
+    const bytes: [*]const volatile u8 = @ptrCast(s);
+    var i: usize = 0;
+    while (true) : (i += 1) {
+        if (bytes[i] == 0) return i;
+    }
 }
 
 pub fn basename(path: []const u8) []const u8 {
@@ -77,4 +91,19 @@ test "Env: first definition wins and unknown names are skipped" {
     try std.testing.expectEqualStrings("foot", env.TERM.?);
     try std.testing.expectEqualStrings("", env.USER.?);
     try std.testing.expect(env.HOME == null);
+}
+
+test "Env: a value over 64 KiB is read whole" {
+    // Linux allows one environment string up to 128 KiB. A scan that stops short of the NUL
+    // hands back a slice whose claimed sentinel is not there.
+    const len = 70_000;
+    var buf: [5 + len + 1]u8 = undefined;
+    @memcpy(buf[0..5], "USER=");
+    @memset(buf[5..][0..len], 'a');
+    buf[buf.len - 1] = 0;
+    const entry: [*:0]u8 = @ptrCast(&buf);
+    var entries = [_:null]?[*:0]u8{entry};
+    const env: Env = .init(.{ .slice = &entries });
+    try std.testing.expectEqual(@as(usize, len), env.USER.?.len);
+    try std.testing.expectEqual(@as(u8, 'a'), env.USER.?[len - 1]);
 }

@@ -56,7 +56,7 @@ const Scratch = struct {
 
 pub fn main(init: std.process.Init.Minimal) u8 {
     var scratch: Scratch = undefined;
-    scratch.env = init_env(init.environ.block);
+    scratch.env = Env.init(init.environ.block);
     const env = &scratch.env;
     const suffix = config_mod.path_suffix;
     // Every report below follows a read of the config file, which needs HOME.
@@ -136,13 +136,7 @@ fn collect(fields: format.Fields, env: *const Env, opts: out.Opts, storage: *Sto
     }
     if (any(fields, .{ .cpu, .cpu_cores, .cpu_threads, .cpu_percent, .load })) {
         // Each cpu source is read only for the fields that need it (cpu.Need).
-        const stats = cpu.collect(&storage.cpu, .{
-            .model = fields.contains(.cpu),
-            .cores = fields.contains(.cpu_cores),
-            .threads = fields.contains(.cpu_threads),
-            .percent = fields.contains(.cpu_percent),
-            .load = fields.contains(.load),
-        });
+        const stats = cpu.collect(&storage.cpu, cpu.need_of(fields));
         values.set(.cpu, stats.cpu);
         values.set(.cpu_cores, stats.cpu_cores);
         values.set(.cpu_threads, stats.cpu_threads);
@@ -186,44 +180,6 @@ fn collect(fields: format.Fields, env: *const Env, opts: out.Opts, storage: *Sto
 fn any(fields: format.Fields, ids: anytype) bool {
     inline for (ids) |id| if (fields.contains(id)) return true;
     return false;
-}
-
-/// The walk `Env.init` does, but the value length is scanned here with a bounded loop instead of
-/// `std.mem.span`: LLVM turns span's NUL search into a call to `strlen`, and compiler_rt's copy
-/// sits on a cold page at the end of the image — one first-touch page fault per run in a binary
-/// whose whole startup is a handful. Same rule as `Env.init`: the first definition of a name wins.
-fn init_env(block: std.process.Environ.Block) Env {
-    var env: Env = .{};
-    for (block.slice) |entry_ptr| {
-        const entry = entry_ptr orelse continue;
-        inline for (@typeInfo(Env).@"struct".field_names) |name| {
-            const prefix = name ++ "=";
-            if (@field(env, name) == null and entry_has_prefix(entry, prefix)) {
-                const value = value_len(entry + prefix.len);
-                @field(env, name) = entry[prefix.len .. prefix.len + value :0];
-            }
-        }
-    }
-    return env;
-}
-
-/// Byte by byte: stopping at the first mismatch never reads past the terminating NUL.
-fn entry_has_prefix(entry: [*:0]const u8, comptime prefix: []const u8) bool {
-    inline for (prefix, 0..) |byte, i| {
-        if (entry[i] != byte) return false;
-    }
-    return true;
-}
-
-/// A bounded NUL scan, inline. The volatile load is the whole point: without it LLVM rewrites even
-/// the bounded shape into `min(strlen(s), bound)` — back to the cold-page call (see `init_env`).
-inline fn value_len(s: [*:0]const u8) usize {
-    const bytes: [*]const volatile u8 = @ptrCast(s);
-    var i: usize = 0;
-    while (i < std.math.maxInt(u16)) : (i += 1) {
-        if (bytes[i] == 0) return i;
-    }
-    return std.math.maxInt(u16);
 }
 
 fn hostname(storage: *Storage, uts_read: bool) []const u8 {
@@ -282,19 +238,6 @@ test {
     _ = @import("pkg.zig");
     _ = @import("terminal.zig");
     _ = @import("wm.zig");
-}
-
-test "init_env: first definition wins, unknown names are skipped" {
-    var entries = [_:null]?[*:0]u8{
-        @constCast("TERM=foot"),
-        @constCast("NOPE=1"),
-        @constCast("TERM=xterm"),
-        @constCast("USER="),
-    };
-    const env = init_env(.{ .slice = &entries });
-    try std.testing.expectEqualStrings("foot", env.TERM.?);
-    try std.testing.expectEqualStrings("", env.USER.?);
-    try std.testing.expect(env.HOME == null);
 }
 
 test "format_uptime: minute, hour and day forms" {
