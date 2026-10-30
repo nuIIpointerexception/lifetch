@@ -1,6 +1,7 @@
 const std = @import("std");
 const mem = std.mem;
 
+const format = @import("format.zig");
 const out = @import("out.zig");
 const sys = @import("sys.zig");
 
@@ -24,6 +25,19 @@ pub const Need = struct {
     percent: bool = false,
     load: bool = false,
 };
+
+/// Which sources the placeholders of a template ask for. Pure, so a field wired to the wrong
+/// source shows up in a test instead of as an extra file read. `{cpu}` wants the model name and
+/// the core count: both live in /proc/cpuinfo, which is one read either way.
+pub fn need_of(fields: format.Fields) Need {
+    return .{
+        .model = fields.contains(.cpu),
+        .cores = fields.contains(.cpu) or fields.contains(.cpu_cores),
+        .threads = fields.contains(.cpu_threads),
+        .percent = fields.contains(.cpu_percent),
+        .load = fields.contains(.load),
+    };
+}
 
 /// The first line whose key names the model is well inside the first block of /proc/cpuinfo;
 /// reading only 1024 bytes keeps a many-socket machine from spilling the stack buffer.
@@ -290,6 +304,60 @@ test "parse_online: ranges, a single CPU and empty text" {
     try std.testing.expectEqualStrings("1", parse_online("0-0\n", &digits));
     try std.testing.expectEqualStrings("unknown", parse_online("", &digits));
     try std.testing.expectEqualStrings("unknown", parse_online("0-7,\n", &digits));
+}
+
+test "need_of: {cpu} asks for the model name and the core count" {
+    const need = need_of(.init(.{ .cpu = true }));
+    try std.testing.expect(need.model);
+    try std.testing.expect(need.cores);
+    try std.testing.expect(!need.threads);
+    try std.testing.expect(!need.percent);
+    try std.testing.expect(!need.load);
+}
+
+test "need_of: {cpu_cores} asks for the core count only" {
+    const need = need_of(.init(.{ .cpu_cores = true }));
+    try std.testing.expect(!need.model);
+    try std.testing.expect(need.cores);
+    try std.testing.expect(!need.threads);
+    try std.testing.expect(!need.percent);
+    try std.testing.expect(!need.load);
+}
+
+test "need_of: {cpu_threads} asks for the thread count only" {
+    const need = need_of(.init(.{ .cpu_threads = true }));
+    try std.testing.expect(!need.model);
+    try std.testing.expect(!need.cores);
+    try std.testing.expect(need.threads);
+    try std.testing.expect(!need.percent);
+    try std.testing.expect(!need.load);
+}
+
+test "need_of: {cpu_percent} asks for the busy share only" {
+    const need = need_of(.init(.{ .cpu_percent = true }));
+    try std.testing.expect(!need.model);
+    try std.testing.expect(!need.cores);
+    try std.testing.expect(!need.threads);
+    try std.testing.expect(need.percent);
+    try std.testing.expect(!need.load);
+}
+
+test "need_of: {load} asks for the load average only" {
+    const need = need_of(.init(.{ .load = true }));
+    try std.testing.expect(!need.model);
+    try std.testing.expect(!need.cores);
+    try std.testing.expect(!need.threads);
+    try std.testing.expect(!need.percent);
+    try std.testing.expect(need.load);
+}
+
+test "need_of: an empty template asks for nothing" {
+    const need = need_of(.init(.{}));
+    try std.testing.expect(!need.model);
+    try std.testing.expect(!need.cores);
+    try std.testing.expect(!need.threads);
+    try std.testing.expect(!need.percent);
+    try std.testing.expect(!need.load);
 }
 
 test "collect: nothing needed opens no source" {

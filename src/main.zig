@@ -136,13 +136,7 @@ fn collect(fields: format.Fields, env: *const Env, opts: out.Opts, storage: *Sto
     }
     if (any(fields, .{ .cpu, .cpu_cores, .cpu_threads, .cpu_percent, .load })) {
         // Each cpu source is read only for the fields that need it (cpu.Need).
-        const stats = cpu.collect(&storage.cpu, .{
-            .model = fields.contains(.cpu),
-            .cores = fields.contains(.cpu_cores),
-            .threads = fields.contains(.cpu_threads),
-            .percent = fields.contains(.cpu_percent),
-            .load = fields.contains(.load),
-        });
+        const stats = cpu.collect(&storage.cpu, cpu.need_of(fields));
         values.set(.cpu, stats.cpu);
         values.set(.cpu_cores, stats.cpu_cores);
         values.set(.cpu_threads, stats.cpu_threads);
