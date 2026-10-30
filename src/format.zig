@@ -3,6 +3,8 @@ const mem = std.mem;
 
 const Opts = @import("out.zig").Opts;
 const Out = @import("out.zig").Out;
+const parse_uint = @import("out.zig").parse_uint;
+const copy = @import("out.zig").copy;
 
 pub const Placeholder = enum {
     user,
@@ -75,7 +77,7 @@ pub const Text = struct {
     /// False when `value` does not fit.
     pub fn set(self: *Text, value: []const u8) bool {
         if (value.len > self.buf.len) return false;
-        @memcpy(self.buf[0..value.len], value);
+        copy(self.buf[0..value.len], value);
         self.len = @intCast(value.len);
         return true;
     }
@@ -401,7 +403,9 @@ fn write_value(out: *Out, values: *const Values, settings: *const Settings, id: 
         .gpus => write_join(out, values.gpus[0..values.gpu_count], settings.sep_gpu.slice(), .name),
         .disk, .disk_used, .disk_total, .disk_percent => out.write(disk_value(values, id, arg)),
         .gpu, .gpu_vram, .gpu_percent => out.write(gpu_value(values, id, arg)),
-        else => out.write(values.plain.get(id)),
+        // `get` copies the whole 528-byte array (its `self` is by value) into a memcpy call per
+        // render; `getPtrConst` just reads the slot.
+        else => out.write(values.plain.getPtrConst(id).*),
     }
 }
 
@@ -414,7 +418,7 @@ fn write_join(out: *Out, slots: anytype, sep: []const u8, comptime piece: std.me
     }
 }
 
-/// The piece of one disk slot: no argument is slot 0, a decimal argument an index, and any
+/// The piece of one disk slot: no argument is slot 0, a plain-digit argument an index, and any
 /// other argument a mount path or device string. A miss is "unknown".
 fn disk_value(values: *const Values, id: Placeholder, arg: ?[]const u8) []const u8 {
     const slot = find_disk(values.disks[0..values.disk_count], arg) orelse return "unknown";
@@ -430,16 +434,18 @@ fn disk_value(values: *const Values, id: Placeholder, arg: ?[]const u8) []const 
 fn find_disk(slots: []const DiskSlot, arg: ?[]const u8) ?*const DiskSlot {
     const a = arg orelse "";
     if (a.len == 0) return if (slots.len > 0) &slots[0] else null;
-    if (std.fmt.parseInt(usize, a, 10)) |index| {
+    // An index is plain digits ("2"), never parseInt's "+2" or "1_0": those spell paths here.
+    if (parse_uint(a)) |n| {
+        const index: usize = @intCast(n);
         return if (index < slots.len) &slots[index] else null;
-    } else |_| {}
+    }
     for (slots) |*slot| {
         if (mem.eql(u8, slot.mount, a) or mem.eql(u8, slot.dev, a)) return slot;
     }
     return null;
 }
 
-/// The piece of one gpu slot: no argument is slot 0, a decimal argument an index. A miss is
+/// The piece of one gpu slot: no argument is slot 0, a plain-digit argument an index. A miss is
 /// "unknown".
 fn gpu_value(values: *const Values, id: Placeholder, arg: ?[]const u8) []const u8 {
     const slot = find_gpu(values.gpus[0..values.gpu_count], arg) orelse return "unknown";
@@ -454,7 +460,9 @@ fn gpu_value(values: *const Values, id: Placeholder, arg: ?[]const u8) []const u
 fn find_gpu(slots: []const GpuSlot, arg: ?[]const u8) ?*const GpuSlot {
     const a = arg orelse "";
     if (a.len == 0) return if (slots.len > 0) &slots[0] else null;
-    const index = std.fmt.parseInt(usize, a, 10) catch return null;
+    // Like find_disk: an index is plain digits, anything else is a miss.
+    const n = parse_uint(a) orelse return null;
+    const index: usize = @intCast(n);
     return if (index < slots.len) &slots[index] else null;
 }
 
@@ -595,18 +603,21 @@ test "render: disk and gpu slots resolve by index, mount and device" {
 
     var out: Out = undefined;
     out.init(-1);
-    const disks = "{disk}|{disk(/home)}|{disk(1)}|{disk(/dev/sda2)}|{disk_used(/)}|{disk(nope)}|{disks}";
+    const disks = "{disk}|{disk(/home)}|{disk(1)}|{disk(/dev/sda2)}|{disk_used(/)}|{disk(nope)}" ++
+        "|{disk(+0)}|{disk(1_0)}|{disk(007)}|{disk(18446744073709551616)}|{disks}";
     render(disks, &values, &settings, .{ .basic = true, .truecolor = true }, &out);
     try std.testing.expectEqualStrings(
         "39G / 50G (79%)|1.6T / 1.9T (84%)|1.6T / 1.9T (84%)|1.6T / 1.9T (84%)" ++
-            "|39G|unknown|39G / 50G (79%) · 1.6T / 1.9T (84%)",
+            "|39G|unknown|unknown|unknown|unknown|unknown" ++
+            "|39G / 50G (79%) · 1.6T / 1.9T (84%)",
         out.buf[0..out.len],
     );
 
     out.len = 0;
-    render("{gpu}|{gpu_vram}|{gpu_percent}|{gpu(1)}|{gpus}", &values, &settings, .{ .basic = true, .truecolor = true }, &out);
+    render("{gpu}|{gpu_vram}|{gpu_percent}|{gpu(1)}|{gpu(+0)}|{gpu(1_0)}|{gpus}", &values, &settings, .{ .basic = true, .truecolor = true }, &out);
     try std.testing.expectEqualStrings(
-        "NVIDIA GeForce RTX 4070 Laptop GPU|unknown|12%|unknown|NVIDIA GeForce RTX 4070 Laptop GPU",
+        "NVIDIA GeForce RTX 4070 Laptop GPU|unknown|12%|unknown|unknown|unknown" ++
+            "|NVIDIA GeForce RTX 4070 Laptop GPU",
         out.buf[0..out.len],
     );
 
@@ -673,6 +684,7 @@ test "scan: an accepted format renders with every tag consumed" {
         "a{",
         "}{}{/}",
         "{disk(/home)}{gpu(0)}",
+        "{disk(/home)}{disk_used(/dev/sda1)}{disk_total(1)}{disk_percent(nope)}{gpu(0)}{gpu_vram(+0)}{gpu_percent(1_0)}",
         "{@a}{color.b}",
     } });
 }

@@ -135,29 +135,18 @@ fn value_kbytes(text: []const u8) ?u64 {
     const value = mem.trim(u8, text, " \t");
     var end: usize = 0;
     while (end < value.len and value[end] >= '0' and value[end] <= '9') end += 1;
-    const count = parse_uint(value[0..end]) orelse return null;
+    const count = out.parse_uint(value[0..end]) orelse return null;
     if (count > std.math.maxInt(u64) / 1024) return null;
     return count * 1024;
 }
 
-/// Decimal text to a value; null on empty text, a non-digit or overflow.
-fn parse_uint(text: []const u8) ?u64 {
-    var value: u64 = 0;
-    for (text) |c| {
-        if (c < '0' or c > '9') return null;
-        const digit: u64 = c - '0';
-        if (value > (std.math.maxInt(u64) - digit) / 10) return null;
-        value = value * 10 + digit;
-    }
-    return if (text.len == 0) null else value;
-}
 
 /// Plain appends into the fixed buffer: the parts are already formatted and there is no formatter
 /// for ad-hoc layouts without std.io.
 fn composite(buf: *[composite_len]u8, used: []const u8, total: []const u8, percent: []const u8) []const u8 {
     var len: usize = 0;
     for ([_][]const u8{ used, " / ", total, " (", percent, ")" }) |part| {
-        @memcpy(buf[len..][0..part.len], part);
+        out.copy(buf[len..][0..part.len], part);
         len += part.len;
     }
     return buf[0..len];

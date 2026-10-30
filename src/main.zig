@@ -39,23 +39,28 @@ comptime {
     std.debug.assert(disk.max_disks <= format.disk_slots_max);
     std.debug.assert(gpu.max_gpus <= format.gpu_slots_max);
     var bad: []const u8 = undefined;
-    const settings = config_mod.parse_options(config_mod.default_file, &bad) catch @compileError("config.ini: bad option");
-    _ = format.scan(config_mod.default_format, &settings, &bad) catch @compileError("config.ini: bad tag");
+    _ = format.scan(config_mod.default_format, &config_mod.default_settings, &bad) catch @compileError("config.ini: bad tag");
 }
 
-/// Every buffer of a run in one object, so first touches land on as few stack pages as possible.
+/// Every buffer of a run in one object. The hot half — what every template writes — comes first
+/// so it sits at the stack bottom, where the call pushes share its pages instead of faulting
+/// pages of their own; `Storage` is last and largest, and only a family's `collect` writes it.
 const Scratch = struct {
-    config: Config,
+    env: Env,
+    values: format.Values,
     stdout: Out,
+    config: Config,
     storage: Storage,
 };
 
+
 pub fn main(init: std.process.Init.Minimal) u8 {
-    const env: Env = .init(init.environ.block);
     var scratch: Scratch = undefined;
+    scratch.env = init_env(init.environ.block);
+    const env = &scratch.env;
     const suffix = config_mod.path_suffix;
     // Every report below follows a read of the config file, which needs HOME.
-    const parsed = scratch.config.load(env.HOME) catch |err| {
+    const parsed = scratch.config.load(env.HOME, config_mod.Stderr{ .home = env.HOME orelse "" }) catch |err| {
         switch (err) {
             error.ConfigTooLarge => report(&.{
                 "lifetch: ",
@@ -64,9 +69,6 @@ pub fn main(init: std.process.Init.Minimal) u8 {
                 std.fmt.comptimePrint(" is larger than {d} bytes\n", .{config_mod.file_len_max - 1}),
             }),
             error.ConfigUnreadable => report(&.{ "lifetch: ", env.HOME.?, suffix, " cannot be read\n" }),
-            error.ConfigInvalid => report(&.{
-                "lifetch: invalid option \"", scratch.config.invalid, "\" in ", env.HOME.?, suffix, "\n",
-            }),
         }
         return 1;
     };
@@ -75,15 +77,15 @@ pub fn main(init: std.process.Init.Minimal) u8 {
     }
 
     var invalid: []const u8 = undefined;
-    const fields = format.scan(parsed.format, &parsed.settings, &invalid) catch {
+    const fields = format.scan(parsed.format, parsed.settings, &invalid) catch {
         report(&.{ "lifetch: invalid tag \"", invalid, "\" in ", env.HOME.?, suffix, "\n" });
         return 1;
     };
 
-    const values = collect(fields, &env, parsed.settings.opts, &scratch.storage);
+    collect(fields, env, parsed.settings.opts, &scratch.storage, &scratch.values);
     const stdout = &scratch.stdout;
     stdout.init(1);
-    format.render(parsed.format, &values, &parsed.settings, terminal.colors(&env), stdout);
+    format.render(parsed.format, &scratch.values, parsed.settings, terminal.colors(env), stdout);
     stdout.write("\n");
     stdout.flush();
     return @intFromBool(stdout.failed);
@@ -103,9 +105,9 @@ const Storage = struct {
 };
 
 /// Every family is fetched only when the template asks for it, so an unused placeholder costs
-/// nothing at startup.
-fn collect(fields: format.Fields, env: *const Env, opts: out.Opts, storage: *Storage) format.Values {
-    var values: format.Values = .initFill("");
+/// nothing at startup. Results land in caller-owned `values`; nothing is copied out.
+fn collect(fields: format.Fields, env: *const Env, opts: out.Opts, storage: *Storage, values: *format.Values) void {
+    values.* = .initFill("");
     if (fields.contains(.user)) values.set(.user, env.USER orelse "unknown");
     if (fields.contains(.shell)) values.set(.shell, env_mod.basename(env.SHELL orelse "unknown"));
     if (fields.contains(.host) or fields.contains(.kernel)) {
@@ -133,7 +135,14 @@ fn collect(fields: format.Fields, env: *const Env, opts: out.Opts, storage: *Sto
         values.set(.distro_pretty, found.name);
     }
     if (any(fields, .{ .cpu, .cpu_cores, .cpu_threads, .cpu_percent, .load })) {
-        const stats = cpu.collect(&storage.cpu);
+        // Each cpu source is read only for the fields that need it (cpu.Need).
+        const stats = cpu.collect(&storage.cpu, .{
+            .model = fields.contains(.cpu),
+            .cores = fields.contains(.cpu_cores),
+            .threads = fields.contains(.cpu_threads),
+            .percent = fields.contains(.cpu_percent),
+            .load = fields.contains(.load),
+        });
         values.set(.cpu, stats.cpu);
         values.set(.cpu_cores, stats.cpu_cores);
         values.set(.cpu_threads, stats.cpu_threads);
@@ -172,12 +181,49 @@ fn collect(fields: format.Fields, env: *const Env, opts: out.Opts, storage: *Sto
             values.gpus[i] = .{ .name = slot.name, .vram = slot.vram, .busy = slot.busy };
         }
     }
-    return values;
 }
 
 fn any(fields: format.Fields, ids: anytype) bool {
     inline for (ids) |id| if (fields.contains(id)) return true;
     return false;
+}
+
+/// The walk `Env.init` does, but the value length is scanned here with a bounded loop instead of
+/// `std.mem.span`: LLVM turns span's NUL search into a call to `strlen`, and compiler_rt's copy
+/// sits on a cold page at the end of the image — one first-touch page fault per run in a binary
+/// whose whole startup is a handful. Same rule as `Env.init`: the first definition of a name wins.
+fn init_env(block: std.process.Environ.Block) Env {
+    var env: Env = .{};
+    for (block.slice) |entry_ptr| {
+        const entry = entry_ptr orelse continue;
+        inline for (@typeInfo(Env).@"struct".field_names) |name| {
+            const prefix = name ++ "=";
+            if (@field(env, name) == null and entry_has_prefix(entry, prefix)) {
+                const value = value_len(entry + prefix.len);
+                @field(env, name) = entry[prefix.len .. prefix.len + value :0];
+            }
+        }
+    }
+    return env;
+}
+
+/// Byte by byte: stopping at the first mismatch never reads past the terminating NUL.
+fn entry_has_prefix(entry: [*:0]const u8, comptime prefix: []const u8) bool {
+    inline for (prefix, 0..) |byte, i| {
+        if (entry[i] != byte) return false;
+    }
+    return true;
+}
+
+/// A bounded NUL scan, inline. The volatile load is the whole point: without it LLVM rewrites even
+/// the bounded shape into `min(strlen(s), bound)` — back to the cold-page call (see `init_env`).
+inline fn value_len(s: [*:0]const u8) usize {
+    const bytes: [*]const volatile u8 = @ptrCast(s);
+    var i: usize = 0;
+    while (i < std.math.maxInt(u16)) : (i += 1) {
+        if (bytes[i] == 0) return i;
+    }
+    return std.math.maxInt(u16);
 }
 
 fn hostname(storage: *Storage, uts_read: bool) []const u8 {
@@ -207,7 +253,7 @@ fn format_uptime(seconds: u64, buf: *Uptime) []const u8 {
 fn append_unit(buf: *Uptime, len: usize, value: u64, unit: u8) usize {
     var digits: out.Digits = undefined;
     const text = out.format_uint(value, &digits);
-    @memcpy(buf[len..][0..text.len], text);
+    out.copy(buf[len..][0..text.len], text);
     buf[len + text.len] = unit;
     buf[len + text.len + 1] = ' ';
     return len + text.len + 2;
@@ -236,6 +282,19 @@ test {
     _ = @import("pkg.zig");
     _ = @import("terminal.zig");
     _ = @import("wm.zig");
+}
+
+test "init_env: first definition wins, unknown names are skipped" {
+    var entries = [_:null]?[*:0]u8{
+        @constCast("TERM=foot"),
+        @constCast("NOPE=1"),
+        @constCast("TERM=xterm"),
+        @constCast("USER="),
+    };
+    const env = init_env(.{ .slice = &entries });
+    try std.testing.expectEqualStrings("foot", env.TERM.?);
+    try std.testing.expectEqualStrings("", env.USER.?);
+    try std.testing.expect(env.HOME == null);
 }
 
 test "format_uptime: minute, hour and day forms" {

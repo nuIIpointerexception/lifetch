@@ -21,7 +21,7 @@ pub const Out = struct {
                 return;
             }
         }
-        @memcpy(self.buf[self.len..][0..bytes.len], bytes);
+        copy(self.buf[self.len..][0..bytes.len], bytes);
         self.len += bytes.len;
     }
 
@@ -49,6 +49,18 @@ pub fn format_uint(value: u64, digits: *Digits) []const u8 {
         if (rest == 0) break;
     }
     return digits[i..];
+}
+
+/// Decimal text to a value; null on empty text, a non-digit or overflow.
+pub fn parse_uint(text: []const u8) ?u64 {
+    var value: u64 = 0;
+    for (text) |c| {
+        if (c < '0' or c > '9') return null;
+        const digit: u64 = c - '0';
+        if (value > (std.math.maxInt(u64) - digit) / 10) return null;
+        value = value * 10 + digit;
+    }
+    return if (text.len == 0) null else value;
 }
 
 pub const Unit = enum { auto, b, k, m, g, t };
@@ -124,7 +136,7 @@ pub fn format_size(bytes: u64, opts: Opts, buf: *SizeBuf) []const u8 {
     var digits: Digits = undefined;
     const whole = format_uint(integer, &digits);
     var len: usize = 0;
-    @memcpy(buf[len..][0..whole.len], whole);
+    copy(buf[len..][0..whole.len], whole);
     len += whole.len;
     if (frac != 0) {
         var frac_text: [precision_max]u8 = undefined;
@@ -138,7 +150,7 @@ pub fn format_size(bytes: u64, opts: Opts, buf: *SizeBuf) []const u8 {
         var keep: usize = precision;
         while (frac_text[keep - 1] == '0') keep -= 1;
         buf[len] = '.';
-        @memcpy(buf[len + 1 ..][0..keep], frac_text[0..keep]);
+        copy(buf[len + 1 ..][0..keep], frac_text[0..keep]);
         len += 1 + keep;
     }
     buf[len] = "BKMGT"[shift];
@@ -149,19 +161,44 @@ pub fn format_size(bytes: u64, opts: Opts, buf: *SizeBuf) []const u8 {
 /// Room for "100%".
 pub const PercentBuf = [4]u8;
 
-/// Whole percent of `whole`, rounded half up and clamped to 100 (the `use%` of `df`); "0%" when
-/// `whole` is zero.
+/// Whole percent of `whole`, rounded half up and clamped to 100 (the htop convention: mem and
+/// swap, cpu and gpu shares use this); "0%" when `whole` is zero.
 pub fn format_percent(part: u64, whole: u64, buf: *PercentBuf) []const u8 {
     var percent: u64 = 0;
     if (whole > 0) {
         const scaled = (@as(u128, part) * 2 * 100 + whole) / (2 * @as(u128, whole));
         percent = @intCast(@min(scaled, 100));
     }
+    return format_percent_text(percent, buf);
+}
+
+/// Whole percent of `whole`, rounded UP and clamped to 100 (the `Use%` of `df`, which never
+/// understates a used share: 78.2% prints as 79%); the disk fields use this. "0%" when `whole`
+/// is zero.
+pub fn format_percent_ceil(part: u64, whole: u64, buf: *PercentBuf) []const u8 {
+    var percent: u64 = 0;
+    if (whole > 0) {
+        const scaled = (@as(u128, part) * 100 +| @as(u128, whole) -| 1) / @as(u128, whole);
+        percent = @intCast(@min(scaled, 100));
+    }
+    return format_percent_text(percent, buf);
+}
+
+fn format_percent_text(percent: u64, buf: *PercentBuf) []const u8 {
     var digits: Digits = undefined;
     const text = format_uint(percent, &digits);
-    @memcpy(buf[0..text.len], text);
+    copy(buf[0..text.len], text);
     buf[text.len] = '%';
     return buf[0 .. text.len + 1];
+}
+
+/// Copies `src` into `dst`, always inline. A runtime-length `@memcpy` lowers to a call to
+/// `memcpy`, whose compiler_rt copy sits on a cold page at the end of the image — a first-touch
+/// page fault per run in a binary where the whole startup is a handful; the volatile load keeps
+/// this loop from being turned back into such a call.
+pub inline fn copy(dst: []u8, src: []const u8) void {
+    const s: [*]const volatile u8 = @ptrCast(src.ptr);
+    for (0..src.len) |i| dst[i] = s[i];
 }
 
 /// Null when `parts` and the terminating NUL do not fit in `buf`.
@@ -169,7 +206,7 @@ pub fn join_z(buf: []u8, parts: []const []const u8) ?[:0]const u8 {
     var len: usize = 0;
     for (parts) |part| {
         if (part.len >= buf.len - len) return null;
-        @memcpy(buf[len..][0..part.len], part);
+        copy(buf[len..][0..part.len], part);
         len += part.len;
     }
     buf[len] = 0;
@@ -275,4 +312,33 @@ test "format_percent: zero whole, clamp and rounding" {
     try std.testing.expectEqualStrings("25%", format_percent(250, 1000, &buf));
     try std.testing.expectEqualStrings("100%", format_percent(996, 1000, &buf)); // 99.6 rounds up
     try std.testing.expectEqualStrings("45%", format_percent(30523576320, 68451051520, &buf));
+}
+
+test "format_percent_ceil: ceiling rounding matches df" {
+    var buf: PercentBuf = undefined;
+    // 78.2% of the disk is used: half up would say 78, df says 79.
+    try std.testing.expectEqualStrings("79%", format_percent_ceil(39_100_000_000, 50_000_000_000, &buf));
+    // The same share still rounds half up in format_percent (htop convention).
+    try std.testing.expectEqualStrings("78%", format_percent(39_100_000_000, 50_000_000_000, &buf));
+    // An exact percent is not inflated by the ceiling.
+    try std.testing.expectEqualStrings("78%", format_percent_ceil(39e9, 50e9, &buf));
+    // One used block out of a million is still 1%, like df.
+    try std.testing.expectEqualStrings("1%", format_percent_ceil(1, 1_000_000, &buf));
+    try std.testing.expectEqualStrings("0%", format_percent_ceil(0, 1_000_000, &buf));
+    try std.testing.expectEqualStrings("0%", format_percent_ceil(0, 0, &buf));
+    try std.testing.expectEqualStrings("100%", format_percent_ceil(101, 100, &buf));
+    try std.testing.expectEqualStrings("100%", format_percent_ceil(std.math.maxInt(u64), 1, &buf));
+    // The ceiling of an exact 2/3 is 67%, same as half up here.
+    try std.testing.expectEqualStrings("67%", format_percent_ceil(2, 3, &buf));
+}
+
+test "parse_uint: digits only, empty and overflow are null" {
+    try std.testing.expectEqual(@as(?u64, 0), parse_uint("0"));
+    try std.testing.expectEqual(@as(?u64, 1162), parse_uint("1162"));
+    try std.testing.expectEqual(@as(?u64, std.math.maxInt(u64)), parse_uint("18446744073709551615"));
+    try std.testing.expect(parse_uint("") == null);
+    try std.testing.expect(parse_uint("18446744073709551616") == null);
+    try std.testing.expect(parse_uint("12x") == null);
+    try std.testing.expect(parse_uint("+12") == null);
+    try std.testing.expect(parse_uint("1_0") == null);
 }
