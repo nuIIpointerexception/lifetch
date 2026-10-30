@@ -133,7 +133,7 @@ noinline fn probe(num: u8, texts: *SlotText, opts: out.Opts) Slot {
     const card = out.format_uint(num, &digits);
 
     var uevent: Uevent = .{};
-    if (read_into(&path_buf, &.{ drm_path, "/", card, "/device/uevent" }, &uevent_buf)) |content| {
+    if (read_into(&path_buf, &.{ drm_path, "/card", card, "/device/uevent" }, &uevent_buf)) |content| {
         uevent = parse_uevent(content);
     }
 
@@ -154,13 +154,13 @@ noinline fn probe(num: u8, texts: *SlotText, opts: out.Opts) Slot {
 
         // Only amdgpu exposes these two in sysfs; every other driver reports "unknown".
         if (mem.eql(u8, driver, "amdgpu")) {
-            const vram_path = .{ drm_path, "/", card, "/device/mem_info_vram_total" };
+            const vram_path = .{ drm_path, "/card", card, "/device/mem_info_vram_total" };
             if (read_into(&path_buf, &vram_path, &read_buf)) |content| {
                 if (parse_dec(content)) |bytes| {
                     if (bytes > 0) vram = out.format_size(bytes, opts, &texts.vram);
                 }
             }
-            const busy_path = .{ drm_path, "/", card, "/device/gpu_busy_percent" };
+            const busy_path = .{ drm_path, "/card", card, "/device/gpu_busy_percent" };
             if (read_into(&path_buf, &busy_path, &read_buf)) |content| {
                 if (parse_dec(content)) |percent| busy = out.format_percent(percent, 100, &texts.busy);
             }
@@ -180,7 +180,7 @@ fn read_into(path_buf: []u8, parts: []const []const u8, buf: []u8) ?[]const u8 {
 /// has no proc entry or no model line.
 fn nvidia_model_of(pci_slot: ?[]const u8, path_buf: []u8, read_buf: []u8) ?[]const u8 {
     const slot = pci_slot orelse return null;
-    const parts = .{ nvidia_gpus_path, slot, "/information" };
+    const parts = .{ nvidia_gpus_path, "/", slot, "/information" };
     const content = read_into(path_buf, &parts, read_buf) orelse return null;
     return nvidia_model(content);
 }

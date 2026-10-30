@@ -5,10 +5,14 @@ const mem = std.mem;
 
 const config_mod = @import("config.zig");
 const Config = config_mod.Config;
+const cpu = @import("cpu.zig");
+const disk = @import("disk.zig");
 const distro = @import("distro.zig");
 const env_mod = @import("env.zig");
 const Env = env_mod.Env;
 const format = @import("format.zig");
+const gpu = @import("gpu.zig");
+const meminfo = @import("mem.zig");
 const Out = @import("out.zig").Out;
 const out = @import("out.zig");
 const pkg = @import("pkg.zig");
@@ -31,9 +35,12 @@ else
 pub const panic = if (safety) std.debug.FullPanic(std.debug.defaultPanic) else std.debug.no_panic;
 
 comptime {
-    @setEvalBranchQuota(100_000);
-    var invalid: []const u8 = undefined;
-    _ = format.scan(config_mod.default_format, &invalid) catch @compileError("config.ini: bad tag");
+    @setEvalBranchQuota(300_000);
+    std.debug.assert(disk.max_disks <= format.disk_slots_max);
+    std.debug.assert(gpu.max_gpus <= format.gpu_slots_max);
+    var bad: []const u8 = undefined;
+    const settings = config_mod.parse_options(config_mod.default_file, &bad) catch @compileError("config.ini: bad option");
+    _ = format.scan(config_mod.default_format, &settings, &bad) catch @compileError("config.ini: bad tag");
 }
 
 /// Every buffer of a run in one object, so first touches land on as few stack pages as possible.
@@ -48,15 +55,19 @@ pub fn main(init: std.process.Init.Minimal) u8 {
     var scratch: Scratch = undefined;
     const suffix = config_mod.path_suffix;
     // Every report below follows a read of the config file, which needs HOME.
-    const template = scratch.config.load(env.HOME) catch |err| {
-        const reason = switch (err) {
-            error.ConfigTooLarge => std.fmt.comptimePrint(
-                " is larger than {d} bytes\n",
-                .{config_mod.file_len_max - 1},
-            ),
-            error.ConfigUnreadable => " cannot be read\n",
-        };
-        report(&.{ "lifetch: ", env.HOME.?, suffix, reason });
+    const parsed = scratch.config.load(env.HOME) catch |err| {
+        switch (err) {
+            error.ConfigTooLarge => report(&.{
+                "lifetch: ",
+                env.HOME.?,
+                suffix,
+                std.fmt.comptimePrint(" is larger than {d} bytes\n", .{config_mod.file_len_max - 1}),
+            }),
+            error.ConfigUnreadable => report(&.{ "lifetch: ", env.HOME.?, suffix, " cannot be read\n" }),
+            error.ConfigInvalid => report(&.{
+                "lifetch: invalid option \"", scratch.config.invalid, "\" in ", env.HOME.?, suffix, "\n",
+            }),
+        }
         return 1;
     };
     if (scratch.config.create_failed) {
@@ -64,15 +75,15 @@ pub fn main(init: std.process.Init.Minimal) u8 {
     }
 
     var invalid: []const u8 = undefined;
-    const fields = format.scan(template, &invalid) catch {
+    const fields = format.scan(parsed.format, &parsed.settings, &invalid) catch {
         report(&.{ "lifetch: invalid tag \"", invalid, "\" in ", env.HOME.?, suffix, "\n" });
         return 1;
     };
 
-    const values = collect(fields, &env, &scratch.storage);
+    const values = collect(fields, &env, parsed.settings.opts, &scratch.storage);
     const stdout = &scratch.stdout;
     stdout.init(1);
-    format.render(template, &values, terminal.colors(&env), stdout);
+    format.render(parsed.format, &values, &parsed.settings, terminal.colors(&env), stdout);
     stdout.write("\n");
     stdout.flush();
     return @intFromBool(stdout.failed);
@@ -85,13 +96,26 @@ const Storage = struct {
     pkgs: out.Digits,
     release: [distro.release_buf_len]u8,
     wm: [wm.buf_len]u8,
+    meminfo: meminfo.Storage,
+    cpu: cpu.Storage,
+    disk: disk.Storage,
+    gpu: gpu.Storage,
 };
 
-fn collect(fields: format.Fields, env: *const Env, storage: *Storage) format.Values {
+/// Every family is fetched only when the template asks for it, so an unused placeholder costs
+/// nothing at startup.
+fn collect(fields: format.Fields, env: *const Env, opts: out.Opts, storage: *Storage) format.Values {
     var values: format.Values = .initFill("");
     if (fields.contains(.user)) values.set(.user, env.USER orelse "unknown");
     if (fields.contains(.shell)) values.set(.shell, env_mod.basename(env.SHELL orelse "unknown"));
-    if (fields.contains(.host)) values.set(.host, hostname(storage));
+    if (fields.contains(.host) or fields.contains(.kernel)) {
+        const uts_read = sys.uname(&storage.uts);
+        if (fields.contains(.host)) values.set(.host, hostname(storage, uts_read));
+        if (fields.contains(.kernel)) {
+            const release = if (uts_read) mem.sliceTo(&storage.uts.release, 0) else "";
+            values.set(.kernel, if (release.len > 0) release else "unknown");
+        }
+    }
     if (fields.contains(.uptime)) {
         const seconds = sys.boot_seconds();
         values.set(.uptime, if (seconds) |s| format_uptime(s, &storage.uptime) else "unknown");
@@ -108,11 +132,56 @@ fn collect(fields: format.Fields, env: *const Env, storage: *Storage) format.Val
         values.set(.distro, found.id);
         values.set(.distro_pretty, found.name);
     }
+    if (any(fields, .{ .cpu, .cpu_cores, .cpu_threads, .cpu_percent, .load })) {
+        const stats = cpu.collect(&storage.cpu);
+        values.set(.cpu, stats.cpu);
+        values.set(.cpu_cores, stats.cpu_cores);
+        values.set(.cpu_threads, stats.cpu_threads);
+        values.set(.cpu_percent, stats.cpu_percent);
+        values.set(.load, stats.load);
+    }
+    if (any(fields, .{ .mem, .mem_used, .mem_total, .mem_percent, .swap, .swap_used, .swap_total, .swap_percent })) {
+        const stats = meminfo.collect(&storage.meminfo, opts);
+        values.set(.mem, stats.mem);
+        values.set(.mem_used, stats.mem_used);
+        values.set(.mem_total, stats.mem_total);
+        values.set(.mem_percent, stats.mem_percent);
+        values.set(.swap, stats.swap);
+        values.set(.swap_used, stats.swap_used);
+        values.set(.swap_total, stats.swap_total);
+        values.set(.swap_percent, stats.swap_percent);
+    }
+    if (any(fields, .{ .disk, .disk_used, .disk_total, .disk_percent, .disks })) {
+        const slots = disk.collect(&storage.disk, opts);
+        values.disk_count = slots.len;
+        for (slots.items[0..slots.len], 0..) |*slot, i| {
+            values.disks[i] = .{
+                .mount = slot.mount,
+                .dev = slot.dev,
+                .used = slot.used,
+                .total = slot.total,
+                .percent = slot.percent,
+                .composite = slot.composite,
+            };
+        }
+    }
+    if (any(fields, .{ .gpu, .gpu_vram, .gpu_percent, .gpus })) {
+        const slots = gpu.collect(&storage.gpu, opts);
+        values.gpu_count = slots.len;
+        for (slots.items[0..slots.len], 0..) |*slot, i| {
+            values.gpus[i] = .{ .name = slot.name, .vram = slot.vram, .busy = slot.busy };
+        }
+    }
     return values;
 }
 
-fn hostname(storage: *Storage) []const u8 {
-    if (sys.uname(&storage.uts)) {
+fn any(fields: format.Fields, ids: anytype) bool {
+    inline for (ids) |id| if (fields.contains(id)) return true;
+    return false;
+}
+
+fn hostname(storage: *Storage, uts_read: bool) []const u8 {
+    if (uts_read) {
         const node = mem.sliceTo(&storage.uts.nodename, 0);
         if (node.len > 0 and !mem.eql(u8, node, "(none)")) return node;
     }
@@ -156,9 +225,13 @@ fn report(parts: []const []const u8) void {
 
 test {
     _ = @import("config.zig");
+    _ = @import("cpu.zig");
+    _ = @import("disk.zig");
     _ = @import("distro.zig");
     _ = @import("env.zig");
     _ = @import("format.zig");
+    _ = @import("gpu.zig");
+    _ = @import("mem.zig");
     _ = @import("out.zig");
     _ = @import("pkg.zig");
     _ = @import("terminal.zig");
